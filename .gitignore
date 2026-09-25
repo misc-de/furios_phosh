@@ -1,0 +1,5 @@
+# What the compiler builds: the plugin, the metadata file generated from
+# plugin.in, and the test program.
+*.so
+folder-dock/furios-folder-dock.plugin
+folder-dock/tests/dock-works

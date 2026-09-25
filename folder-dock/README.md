@@ -8,15 +8,22 @@ phosh has no setting or plugin type for this: folders and apps share one
 `GtkFlowBox` inside the scrolled area, and GTK 3's CSS can neither reorder nor
 pin anything. So this is a status-icon plugin that shows nothing in the top
 bar. While it is loaded it finds `PhoshAppGrid` in the shell's windows, puts
-the scrolled area into an overlay of its own (same place, same packing), lays
-a bar over its bottom edge and **moves** phosh's own folder buttons into it.
-A moved button still opens its folder, because the connection that does that
-travels with the widget. When the plugin is switched off, every button goes
-back where it came from, and so does the scrolled area.
+the scrolled area into an overlay of its own (same place, same packing) and
+lays a bar over its bottom edge.
+
+The folders in that bar are **copies**: phosh's own folder buttons stay in
+the grid, only hidden. In phosh 0.55 a folder button *is* the flowbox child,
+and the flowbox is bound to a list model, which drops children by index - a
+button taken out would make phosh destroy the wrong launchers later. A copy
+is the same type built from the same folder info, and pressing it emits
+`folder-launched` on the hidden original, the signal phosh's grid opens
+folders through. When the plugin is switched off, the copies go, the
+originals come back into view, and the scrolled area goes back where it was.
 
 This depends on the inside of phosh's app grid (checked against phosh 0.55):
-the ids `apps` and `scrolled_window` from `app-grid.ui` and the type names
-`PhoshAppGrid` and `PhoshAppGridFolderButton`. If the grid does not look like
+the ids `apps` and `scrolled_window` from `app-grid.ui`, the type names
+`PhoshAppGrid` and `PhoshAppGridFolderButton`, and the folder button's
+`folder-info` property and `folder-launched` signal. If the grid does not look like
 that, the plugin logs one warning and leaves it alone.
 
 ## Crash guard
@@ -39,8 +46,10 @@ and write the rest back with `gsettings set`, or run `./uninstall.sh`.
     # then: misc-de app -> Other -> Folders at the bottom
     ./tests/run-tests.sh        # NEVER with sudo
 
-The test builds the app grid's shape with stand-in types and checks that
-folders go to the dock and still open, that the dock follows the model when
+The test builds the app grid's shape as phosh 0.55 has it (the folder button
+is a `GtkFlowBoxChild`, the flowbox bound to a model) and checks that folders
+show in the dock and still open, that every child of phosh's flowbox stays
+at the index of its own item, that the dock follows the model when
 phosh adds or drops a folder, that a second instance builds no second dock,
 that everything goes back when the last one goes, and that a leftover crash
 mark keeps the grid untouched.

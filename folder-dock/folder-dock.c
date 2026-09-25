@@ -12,11 +12,16 @@
  * nothing, and the reason it exists is a side effect: while it is loaded it
  * finds the app grid in the shell's own windows and rearranges it.
  *
- * It MOVES phosh's folder buttons rather than building its own. A folder
- * button opens its folder through a signal the app grid connected when it
- * made the button, and that connection travels with the widget - so a moved
- * button opens its folder exactly like one that stayed. What is left behind
- * in the grid is the empty GtkFlowBoxChild it sat in, hidden.
+ * It does NOT move phosh's folder buttons. In phosh 0.55 a folder button IS
+ * the GtkFlowBoxChild (PhoshAppGridBaseButton derives from it), and the
+ * flowbox is bound to a list model: when the model changes, GTK finds the
+ * children to drop BY INDEX. A button taken out would shift every index
+ * after it, and phosh would destroy the wrong launchers. So the originals
+ * stay exactly where they are, only hidden, and the dock holds copies of the
+ * same type built from the same folder info. A copy opens its folder by
+ * emitting "folder-launched" on its original - the signal phosh's grid
+ * connected when it made that button, so the folder opens exactly as if the
+ * original had been pressed.
  *
  * Switching it on and off is the `status-icons` list, which phosh follows
  * while it runs: taking the name out destroys our widget, and on destroy
@@ -47,8 +52,10 @@ GType phosh_status_icon_get_type (void);
 #define APPS_ID            "apps"
 #define SCROLLED_ID        "scrolled_window"
 
-/* On a moved button: the GtkFlowBoxChild it came from, as a weak pointer. */
-#define ORIGIN_KEY         "furios-folder-dock-origin"
+/* What a folder button has to offer for a copy of it to work: the folder it
+   shows, and the signal the grid opens it through. */
+#define FOLDER_INFO_PROP   "folder-info"
+#define FOLDER_SIGNAL      "folder-launched"
 
 /*
  * A crash of the shell ends the session, and with the plugin still listed
@@ -78,13 +85,14 @@ typedef struct {
   GtkWidget  *apps;       /* weak: phosh's flowbox */
   GtkWidget  *dock;       /* ours: a revealer-less box, owned by its parent */
   GtkWidget  *flow;       /* ours: the flowbox inside it */
-  GPtrArray  *moved;      /* the buttons we hold, each with a ref */
+  GPtrArray  *pairs;      /* Pair: phosh's hidden button and our copy */
   guint       find_id;
   int         tries;
   guint       sync_id;
   gulong      alloc_id;
   guint       guard_id;
   gboolean    refused;
+  gboolean    warned;
 
   /* Floating: the dock lies over the scrolled area in an overlay of ours,
      which takes the scrolled window's place in phosh's column. Everything
@@ -200,122 +208,183 @@ on_guard_clear (gpointer user_data)
 }
 
 
-/* --- moving buttons ------------------------------------------------------ */
+/* --- the copies ---------------------------------------------------------- */
 
-static void on_origin_destroyed (GtkWidget *child, gpointer user_data);
+typedef struct {
+  GtkWidget *original;    /* weak: phosh's button, hidden while we hold it */
+  GtkWidget *copy;        /* weak: ours, in the dock's flowbox - which the
+                             shell may tear down with the whole grid */
+  gulong     destroy_id;
+} Pair;
+
+static void queue_sync (void);
 static void queue_pad (void);
 
-static void
-put_back (GtkWidget *button)
-{
-  GtkWidget *origin = g_object_get_data (G_OBJECT (button), ORIGIN_KEY);
-  GtkWidget *parent = gtk_widget_get_parent (button);
-
-  if (parent)
-    gtk_container_remove (GTK_CONTAINER (parent), button);
-  /* Our own flowbox wraps each button in a child of its own. */
-  if (GTK_IS_FLOW_BOX_CHILD (parent) && dock.flow &&
-      gtk_widget_get_parent (parent) == dock.flow)
-    gtk_widget_destroy (parent);
-
-  if (GTK_IS_FLOW_BOX_CHILD (origin))
-    g_signal_handlers_disconnect_by_func (origin, on_origin_destroyed, NULL);
-  if (GTK_IS_FLOW_BOX_CHILD (origin) && gtk_bin_get_child (GTK_BIN (origin)) == NULL) {
-    gtk_container_add (GTK_CONTAINER (origin), button);
-    gtk_widget_set_no_show_all (origin, FALSE);
-    gtk_widget_show (origin);
-  }
-  /* No origin left means phosh dropped the folder while we held it; the
-     button goes with our reference below. */
-}
-
 
 static void
-forget (GtkWidget *button)
+on_original_destroyed (GtkWidget *original, gpointer user_data)
 {
-  GtkWidget **origin = g_object_steal_data (G_OBJECT (button), ORIGIN_KEY "-ptr");
-
-  if (origin) {
-    if (*origin)
-      g_object_remove_weak_pointer (G_OBJECT (*origin), (gpointer *) origin);
-    g_free (origin);
-  }
-  g_object_set_data (G_OBJECT (button), ORIGIN_KEY, NULL);
-}
-
-
-/* Take one folder button out of phosh's grid and into the dock. */
-static void
-take (GtkWidget *child, GtkWidget *button)
-{
-  GtkWidget **origin = g_new0 (GtkWidget *, 1);
-
-  *origin = child;
-  g_object_add_weak_pointer (G_OBJECT (child), (gpointer *) origin);
-  g_object_set_data (G_OBJECT (button), ORIGIN_KEY "-ptr", origin);
-  g_object_set_data (G_OBJECT (button), ORIGIN_KEY, child);
-
-  g_ptr_array_add (dock.moved, g_object_ref (button));
-  gtk_container_remove (GTK_CONTAINER (child), button);
-  gtk_flow_box_insert (GTK_FLOW_BOX (dock.flow), button, -1);
-  gtk_widget_show (button);
-
-  gtk_widget_set_no_show_all (child, TRUE);
-  gtk_widget_hide (child);
   /* A hidden child that phosh destroys does not make the flowbox allocate
      again, so this is the one change the allocation hook never hears of. */
-  g_signal_connect (child, "destroy", G_CALLBACK (on_origin_destroyed), NULL);
+  queue_sync ();
+}
+
+
+/* A copy was pressed: open the folder the way the original would. */
+static void
+on_copy_launched (GtkWidget *copy, GObject *info, gpointer user_data)
+{
+  Pair *pair = user_data;
+
+  if (pair->original)
+    g_signal_emit_by_name (pair->original, FOLDER_SIGNAL, info);
+}
+
+
+static void
+pair_free (gpointer user_data)
+{
+  Pair *pair = user_data;
+
+  if (pair->original) {
+    g_signal_handler_disconnect (pair->original, pair->destroy_id);
+    g_object_remove_weak_pointer (G_OBJECT (pair->original), (gpointer *) &pair->original);
+  }
+  if (pair->copy) {
+    g_signal_handlers_disconnect_by_data (pair->copy, pair);
+    g_object_remove_weak_pointer (G_OBJECT (pair->copy), (gpointer *) &pair->copy);
+    gtk_widget_destroy (pair->copy);
+  }
+  g_free (pair);
 }
 
 
 static gboolean
-origin_alive (GtkWidget *button)
+can_copy (GtkWidget *original)
 {
-  GtkWidget **origin = g_object_get_data (G_OBJECT (button), ORIGIN_KEY "-ptr");
+  GParamSpec *spec = g_object_class_find_property (G_OBJECT_GET_CLASS (original),
+                                                   FOLDER_INFO_PROP);
 
-  return origin && *origin;
+  return spec != NULL &&
+         (spec->flags & G_PARAM_READABLE) &&
+         (spec->flags & (G_PARAM_WRITABLE | G_PARAM_CONSTRUCT | G_PARAM_CONSTRUCT_ONLY)) &&
+         G_TYPE_IS_OBJECT (spec->value_type) &&
+         g_signal_lookup (FOLDER_SIGNAL, G_OBJECT_TYPE (original)) != 0;
+}
+
+
+/* The same type, the same folder: it looks and behaves like the original,
+   down to renaming, because it reads the same folder info. */
+static Pair *
+make_pair (GtkWidget *original)
+{
+  Pair *pair;
+  GObject *info = NULL;
+  GtkWidget *copy;
+
+  g_object_get (original, FOLDER_INFO_PROP, &info, NULL);
+  if (info == NULL)
+    return NULL;
+  copy = g_object_new (G_OBJECT_TYPE (original), FOLDER_INFO_PROP, info, NULL);
+  g_object_unref (info);
+
+  pair = g_new0 (Pair, 1);
+  pair->original = original;
+  g_object_add_weak_pointer (G_OBJECT (original), (gpointer *) &pair->original);
+  pair->destroy_id = g_signal_connect (original, "destroy",
+                                       G_CALLBACK (on_original_destroyed), NULL);
+  pair->copy = copy;
+  g_object_add_weak_pointer (G_OBJECT (copy), (gpointer *) &pair->copy);
+  g_signal_connect (copy, FOLDER_SIGNAL, G_CALLBACK (on_copy_launched), pair);
+  gtk_flow_box_insert (GTK_FLOW_BOX (dock.flow), copy, -1);
+  gtk_widget_show (copy);
+
+  return pair;
+}
+
+
+static void
+hide_original (GtkWidget *original)
+{
+  gtk_widget_set_no_show_all (original, TRUE);
+  if (gtk_widget_get_visible (original))
+    gtk_widget_hide (original);
+}
+
+
+static void
+show_original (GtkWidget *original)
+{
+  gtk_widget_set_no_show_all (original, FALSE);
+  gtk_widget_show (original);
+}
+
+
+/* phosh's folder buttons, in the grid's order. */
+static GPtrArray *
+folders_in_grid (void)
+{
+  GPtrArray *found = g_ptr_array_new ();
+  GList *children = gtk_container_get_children (GTK_CONTAINER (dock.apps));
+
+  for (GList *l = children; l; l = l->next) {
+    if (!is_type (l->data, FOLDER_BUTTON_TYPE))
+      continue;
+    if (!can_copy (l->data)) {
+      if (!dock.warned)
+        g_warning (PLUGIN_NAME ": a folder button without '" FOLDER_INFO_PROP
+                   "' or '" FOLDER_SIGNAL "' - leaving the folders alone");
+      dock.warned = TRUE;
+      continue;
+    }
+    g_ptr_array_add (found, l->data);
+  }
+  g_list_free (children);
+  return found;
 }
 
 
 static void
 sync_dock (void)
 {
-  GList *children;
+  GPtrArray *originals;
+  gboolean same;
 
   if (!dock.apps || !dock.flow)
     return;
 
-  /* Buttons whose place in the grid is gone: phosh removed the folder, or
-     rebuilt the list. They go; the new ones are picked up below. */
-  for (guint i = dock.moved->len; i > 0; i--) {
-    GtkWidget *button = g_ptr_array_index (dock.moved, i - 1);
+  originals = folders_in_grid ();
+  same = originals->len == dock.pairs->len;
+  for (guint i = 0; same && i < originals->len; i++) {
+    Pair *pair = g_ptr_array_index (dock.pairs, i);
 
-    if (!origin_alive (button)) {
-      GtkWidget *parent = gtk_widget_get_parent (button);
+    same = pair->original == g_ptr_array_index (originals, i);
+  }
 
-      if (parent)
-        gtk_container_remove (GTK_CONTAINER (parent), button);
-      if (GTK_IS_FLOW_BOX_CHILD (parent))
-        gtk_widget_destroy (parent);
-      forget (button);
-      g_ptr_array_remove_index (dock.moved, i - 1);
+  /* Anything different - a folder added, dropped, renamed into another
+     place, or the whole list rebuilt - and the copies are made afresh.
+     A handful of folders; not worth a finer diff. The originals that stay
+     are hidden again right below, so none flashes up in between. */
+  if (!same) {
+    g_ptr_array_set_size (dock.pairs, 0);
+    for (guint i = 0; i < originals->len; i++) {
+      Pair *pair = make_pair (g_ptr_array_index (originals, i));
+
+      if (pair)
+        g_ptr_array_add (dock.pairs, pair);
     }
   }
 
-  children = gtk_container_get_children (GTK_CONTAINER (dock.apps));
-  for (GList *l = children; l; l = l->next) {
-    GtkWidget *child = l->data;
-    GtkWidget *inner;
+  /* Only the ones with a copy: a folder we could not copy stays in view. */
+  for (guint i = 0; i < dock.pairs->len; i++) {
+    Pair *pair = g_ptr_array_index (dock.pairs, i);
 
-    if (!GTK_IS_FLOW_BOX_CHILD (child))
-      continue;
-    inner = gtk_bin_get_child (GTK_BIN (child));
-    if (inner && is_type (inner, FOLDER_BUTTON_TYPE))
-      take (child, inner);
+    if (pair->original)
+      hide_original (pair->original);
   }
-  g_list_free (children);
+  g_ptr_array_unref (originals);
 
-  gtk_widget_set_visible (dock.dock, dock.moved->len > 0);
+  gtk_widget_set_visible (dock.dock, dock.pairs->len > 0);
   queue_pad ();
 }
 
@@ -330,7 +399,7 @@ on_sync_idle (gpointer user_data)
 
 
 static void
-on_origin_destroyed (GtkWidget *child, gpointer user_data)
+queue_sync (void)
 {
   if (dock.sync_id == 0 && dock.flow)
     dock.sync_id = g_idle_add (on_sync_idle, NULL);
@@ -376,8 +445,7 @@ on_dock_allocated (GtkWidget *widget, GdkRectangle *alloc, gpointer user_data)
 static void
 on_apps_allocated (GtkWidget *apps, GdkRectangle *alloc, gpointer user_data)
 {
-  if (dock.sync_id == 0)
-    dock.sync_id = g_idle_add (on_sync_idle, NULL);
+  queue_sync ();
 }
 
 
@@ -521,17 +589,15 @@ take_down_dock (void)
     g_signal_handler_disconnect (dock.dock, dock.dock_alloc_id);
   dock.dock_alloc_id = 0;
 
-  if (dock.moved) {
-    for (guint i = 0; i < dock.moved->len; i++) {
-      GtkWidget *button = g_ptr_array_index (dock.moved, i);
+  /* Every original back in view, every copy gone. */
+  if (dock.pairs) {
+    for (guint i = 0; i < dock.pairs->len; i++) {
+      Pair *pair = g_ptr_array_index (dock.pairs, i);
 
-      if (origin_alive (button))
-        put_back (button);
-      else if (gtk_widget_get_parent (button))
-        gtk_container_remove (GTK_CONTAINER (gtk_widget_get_parent (button)), button);
-      forget (button);
+      if (pair->original)
+        show_original (pair->original);
     }
-    g_ptr_array_set_size (dock.moved, 0);
+    g_ptr_array_set_size (dock.pairs, 0);
   }
 
   if (dock.dock)
@@ -620,8 +686,8 @@ furios_folder_dock_init (GTypeInstance *instance, gpointer klass)
 {
   GtkWidget *self = GTK_WIDGET (instance);
 
-  if (!dock.moved)
-    dock.moved = g_ptr_array_new_with_free_func (g_object_unref);
+  if (!dock.pairs)
+    dock.pairs = g_ptr_array_new_with_free_func (pair_free);
 
   /* Asked whenever no dock stands: then no mark can be this shell's own, so
      one that is there was left by a shell that did not survive. Asked again

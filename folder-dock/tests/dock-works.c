@@ -303,15 +303,73 @@ position_in (GtkWidget *box, GtkWidget *child)
 }
 
 
-/* The flowbox inside the dock: the only child of its vertical box. */
+/* The flowbox inside the dock: box, scroller, viewport, flowbox. */
 static GtkWidget *
-dock_flow (GtkWidget *dock)
+dock_scroller (GtkWidget *dock)
 {
   GList *children = gtk_container_get_children (GTK_CONTAINER (dock));
   GtkWidget *last = g_list_last (children)->data;
 
   g_list_free (children);
   return last;
+}
+
+
+static GtkWidget *
+dock_flow (GtkWidget *dock)
+{
+  GtkWidget *child = gtk_bin_get_child (GTK_BIN (dock_scroller (dock)));
+
+  return GTK_IS_VIEWPORT (child) ? gtk_bin_get_child (GTK_BIN (child)) : child;
+}
+
+
+static gboolean
+see_through (GtkWidget *widget)
+{
+  GtkStyleContext *ctx = gtk_widget_get_style_context (widget);
+  GdkRGBA *bg = NULL;
+  cairo_pattern_t *image = NULL;
+  gboolean clear;
+
+  gtk_style_context_get (ctx, gtk_style_context_get_state (ctx),
+                         "background-color", &bg, "background-image", &image, NULL);
+  clear = bg && bg->alpha == 0 && image == NULL;
+  gdk_rgba_free (bg);
+  if (image)
+    cairo_pattern_destroy (image);
+  return clear;
+}
+
+
+/* Every folder copy in the dock on the same line. */
+static gboolean
+one_line (GtkWidget *flow)
+{
+  GList *children = gtk_container_get_children (GTK_CONTAINER (flow));
+  int y = -1;
+  gboolean same = TRUE;
+
+  for (GList *l = children; l; l = l->next) {
+    GtkAllocation a;
+
+    gtk_widget_get_allocation (l->data, &a);
+    if (y < 0)
+      y = a.y;
+    same = same && a.y == y;
+  }
+  g_list_free (children);
+  return same;
+}
+
+
+static void
+write_config (const char *path, const char *text)
+{
+  if (text)
+    g_file_set_contents (path, text, -1, NULL);
+  else
+    g_unlink (path);
 }
 
 
@@ -339,7 +397,7 @@ main (int argc, char *argv[])
   GtkWidget *window, *grid, *column, *search, *scrolled, *inner, *apps;
   GtkWidget *one, *two, *dock;
   GListStore *store;
-  char *guard;
+  char *guard, *config;
 
   if (argc < 2) {
     g_printerr ("usage: %s <directory holding the built plugin>\n", argv[0]);
@@ -352,6 +410,8 @@ main (int argc, char *argv[])
 
     g_setenv ("XDG_CACHE_HOME", cache, TRUE);
     guard = g_build_filename (cache, "furios-folder-dock.armed", NULL);
+    g_setenv ("XDG_CONFIG_HOME", cache, TRUE);
+    config = g_build_filename (cache, "furios-folder-dock.conf", NULL);
     g_free (cache);
   }
   if (!gtk_init_check (&argc, &argv)) {
@@ -502,6 +562,45 @@ main (int argc, char *argv[])
   settle ();
   check ("a show_all on the grid leaves the folders hidden",
          count_children (apps, TRUE, TRUE) == 0);
+
+  check ("the bar has no background of its own: the apps show through",
+         see_through (dock) && see_through (dock_scroller (dock)) &&
+         see_through (gtk_bin_get_child (GTK_BIN (dock_scroller (dock)))));
+
+  /* Many folders: in rows by default, in one line with the setting - which
+     the app writes while the dock stands. */
+  for (int i = 0; i < 10; i++)
+    store_append (store, "More", TRUE);
+  settle ();
+  check ("twelve folders take more than one row by default",
+         count_children (dock_flow (dock), TRUE, FALSE) == 12 && !one_line (dock_flow (dock)));
+  {
+    int rows_height = gtk_widget_get_allocated_height (dock);
+
+    write_config (config, "[dock]\none-row=true\n");
+    settle ();
+    check ("with one-row set, all twelve in one line",
+           one_line (dock_flow (dock)));
+    check ("the bar is lower then", gtk_widget_get_allocated_height (dock) < rows_height);
+    check ("and the line scrolls sideways instead of widening the screen",
+           gtk_widget_get_allocated_width (dock) <= 360);
+    check ("the apps' room at the end follows the lower bar",
+           gtk_widget_get_margin_bottom (inner) == gtk_widget_get_allocated_height (dock));
+    write_config (config, "[dock]\none-row=false\n");
+    settle ();
+    check ("set back, the rows return", !one_line (dock_flow (dock)) &&
+           gtk_widget_get_allocated_height (dock) == rows_height);
+    write_config (config, "[dock]\none-row=true\n");
+    settle ();
+    write_config (config, NULL);
+    settle ();
+    check ("and the file gone means rows as well", !one_line (dock_flow (dock)));
+  }
+  g_list_store_splice (store, g_list_model_get_n_items (G_LIST_MODEL (store)) - 10, 10, NULL, 0);
+  settle ();
+  check ("the extra folders gone, two are left",
+         count_children (dock_flow (dock), TRUE, FALSE) == 2 &&
+         grid_matches_model (apps, G_LIST_MODEL (store)));
 
   /* A second bar with status icons: one dock, not two. */
   two = g_object_new (type, NULL);

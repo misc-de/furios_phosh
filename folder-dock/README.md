@@ -1,8 +1,21 @@
 # phosh-folder-dock
 
 Holds the folders of phosh's app overview in a bar at the bottom edge of the
-screen. The bar lies over the apps, which scroll underneath it; the apps get
-room at their end as tall as the bar, so the last row still comes clear.
+screen. The bar lies over the apps, which scroll underneath it, and has no
+background of its own, so they show through; the apps get room at their end
+as tall as the bar, so the last row still comes clear.
+
+## One row
+
+By default the folders take as many rows as they need. With
+
+    # ~/.config/furios-folder-dock.conf
+    [dock]
+    one-row=true
+
+they stand in a single row that scrolls sideways. The plugin watches the
+file while the dock stands, so a change takes effect at once; the misc-de
+app writes it (Other -> "Folders in one row").
 
 phosh has no setting or plugin type for this: folders and apps share one
 `GtkFlowBox` inside the scrolled area, and GTK 3's CSS can neither reorder nor

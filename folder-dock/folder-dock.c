@@ -68,6 +68,17 @@ GType phosh_status_icon_get_type (void);
 #define GUARD_FILE         "furios-folder-dock.armed"
 #define GUARD_CLEAR_S      15
 
+/*
+ * The one setting, written by the misc-de app: all folders in a single row
+ * that scrolls sideways, instead of as many rows as they need. A key file
+ * in the config directory, watched while the dock stands, so the switch
+ * takes effect at once. No file or no key means the rows as before.
+ */
+#define CONFIG_FILE        "furios-folder-dock.conf"
+#define CONFIG_GROUP       "dock"
+#define CONFIG_ONE_ROW     "one-row"
+#define MAX_PER_LINE       8
+
 /* The app grid is built with the overview, which may come after the top bar.
    Looked for this often and this many times, then given up on. */
 #define FIND_INTERVAL_MS   2000
@@ -84,6 +95,7 @@ typedef struct {
   GtkWidget  *grid;       /* weak */
   GtkWidget  *apps;       /* weak: phosh's flowbox */
   GtkWidget  *dock;       /* ours: a revealer-less box, owned by its parent */
+  GtkWidget  *scroller;   /* ours: sideways scrolling, for the single row */
   GtkWidget  *flow;       /* ours: the flowbox inside it */
   GPtrArray  *pairs;      /* Pair: phosh's hidden button and our copy */
   guint       find_id;
@@ -111,6 +123,9 @@ typedef struct {
   int         content_margin;
   guint       pad_id;
   gulong      dock_alloc_id;
+
+  GFileMonitor *config_monitor;
+  gboolean    one_row;
 } Dock;
 
 static Dock dock;
@@ -344,6 +359,87 @@ folders_in_grid (void)
 }
 
 
+static char *
+config_path (void)
+{
+  return g_build_filename (g_get_user_config_dir (), CONFIG_FILE, NULL);
+}
+
+
+static gboolean
+read_one_row (void)
+{
+  g_autofree char *path = config_path ();
+  g_autoptr (GKeyFile) file = g_key_file_new ();
+
+  if (!g_key_file_load_from_file (file, path, G_KEY_FILE_NONE, NULL))
+    return FALSE;
+  return g_key_file_get_boolean (file, CONFIG_GROUP, CONFIG_ONE_ROW, NULL);
+}
+
+
+/* One row: the flowbox has to put every folder on the first line, and the
+   scroller lets the line be wider than the screen. Rows: as before, the
+   scroller never scrolls and so asks for all the width the flowbox wants. */
+static void
+apply_layout (void)
+{
+  guint n;
+
+  if (!dock.flow || !dock.scroller)
+    return;
+  n = MAX (dock.pairs->len, 1);
+  if (dock.one_row) {
+    g_object_set (dock.flow,
+                  "max-children-per-line", MAX (n, MAX_PER_LINE),
+                  "min-children-per-line", n,
+                  NULL);
+    gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (dock.scroller),
+                                    GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+  } else {
+    g_object_set (dock.flow,
+                  "min-children-per-line", 0,
+                  "max-children-per-line", MAX_PER_LINE,
+                  NULL);
+    gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (dock.scroller),
+                                    GTK_POLICY_NEVER, GTK_POLICY_NEVER);
+  }
+  queue_pad ();
+}
+
+
+static void
+on_config_changed (GFileMonitor *monitor, GFile *file, GFile *other,
+                   GFileMonitorEvent event, gpointer user_data)
+{
+  gboolean want;
+
+  if (event == G_FILE_MONITOR_EVENT_ATTRIBUTE_CHANGED)
+    return;
+  want = read_one_row ();
+  if (want != dock.one_row) {
+    dock.one_row = want;
+    apply_layout ();
+  }
+}
+
+
+/* No background anywhere in the bar: the apps pass underneath and show
+   through. Each of our widgets gets it on its own node, nothing else does. */
+static void
+plain (GtkWidget *widget)
+{
+  GtkCssProvider *css = gtk_css_provider_new ();
+
+  gtk_css_provider_load_from_data (css, "* { background: none; box-shadow: none; }",
+                                   -1, NULL);
+  gtk_style_context_add_provider (gtk_widget_get_style_context (widget),
+                                  GTK_STYLE_PROVIDER (css),
+                                  GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  g_object_unref (css);
+}
+
+
 static void
 sync_dock (void)
 {
@@ -385,6 +481,8 @@ sync_dock (void)
   g_ptr_array_unref (originals);
 
   gtk_widget_set_visible (dock.dock, dock.pairs->len > 0);
+  if (!same)
+    apply_layout ();
   queue_pad ();
 }
 
@@ -458,7 +556,6 @@ build_dock (GtkWidget *grid)
   GtkWidget *scrolled = find_by_name (grid, SCROLLED_ID);
   GtkWidget *column = scrolled ? gtk_widget_get_parent (scrolled) : NULL;
   GtkWidget *content;
-  GtkCssProvider *css;
 
   if (!GTK_IS_FLOW_BOX (apps) || !GTK_IS_SCROLLED_WINDOW (scrolled) || !GTK_IS_BOX (column)) {
     g_warning (PLUGIN_NAME ": the app grid is not the shape this was written for - "
@@ -482,17 +579,7 @@ build_dock (GtkWidget *grid)
   dock.dock = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_valign (dock.dock, GTK_ALIGN_END);
   gtk_style_context_add_class (gtk_widget_get_style_context (dock.dock), PLUGIN_NAME);
-  /* The apps pass underneath, so the bar needs a ground of its own to be
-     read against - the theme's, not quite opaque. On this one widget only. */
-  css = gtk_css_provider_new ();
-  gtk_css_provider_load_from_data (css,
-                                   "." PLUGIN_NAME " {"
-                                   " background-color: alpha(@theme_bg_color, 0.85); }",
-                                   -1, NULL);
-  gtk_style_context_add_provider (gtk_widget_get_style_context (dock.dock),
-                                  GTK_STYLE_PROVIDER (css),
-                                  GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-  g_object_unref (css);
+  plain (dock.dock);
 
   /* The same spacing and margins as phosh's own grid, so the folders look
      the same down here as they did up there. */
@@ -508,9 +595,16 @@ build_dock (GtkWidget *grid)
                 "margin-top", 6,
                 "margin-bottom", 6,
                 "halign", GTK_ALIGN_CENTER,
-                "max-children-per-line", 8,
+                "max-children-per-line", MAX_PER_LINE,
                 NULL);
-  gtk_container_add (GTK_CONTAINER (dock.dock), dock.flow);
+  dock.scroller = gtk_scrolled_window_new (NULL, NULL);
+  gtk_scrolled_window_set_shadow_type (GTK_SCROLLED_WINDOW (dock.scroller), GTK_SHADOW_NONE);
+  gtk_scrolled_window_set_propagate_natural_height (GTK_SCROLLED_WINDOW (dock.scroller), TRUE);
+  gtk_container_add (GTK_CONTAINER (dock.scroller), dock.flow);
+  plain (dock.scroller);
+  /* The viewport GTK puts around the flowbox, which cannot scroll itself. */
+  plain (gtk_bin_get_child (GTK_BIN (dock.scroller)));
+  gtk_container_add (GTK_CONTAINER (dock.dock), dock.scroller);
   gtk_widget_show_all (dock.dock);
   gtk_widget_set_no_show_all (dock.dock, TRUE);
 
@@ -540,6 +634,17 @@ build_dock (GtkWidget *grid)
   g_object_add_weak_pointer (G_OBJECT (dock.overlay), (gpointer *) &dock.overlay);
   g_object_add_weak_pointer (G_OBJECT (dock.dock), (gpointer *) &dock.dock);
   g_object_add_weak_pointer (G_OBJECT (dock.flow), (gpointer *) &dock.flow);
+  g_object_add_weak_pointer (G_OBJECT (dock.scroller), (gpointer *) &dock.scroller);
+
+  {
+    g_autofree char *path = config_path ();
+    g_autoptr (GFile) file = g_file_new_for_path (path);
+
+    dock.one_row = read_one_row ();
+    dock.config_monitor = g_file_monitor_file (file, G_FILE_MONITOR_NONE, NULL, NULL);
+    if (dock.config_monitor)
+      g_signal_connect (dock.config_monitor, "changed", G_CALLBACK (on_config_changed), NULL);
+  }
 
   /* The box inside the scrolled window - through the viewport GTK puts
      around anything that cannot scroll by itself. */
@@ -588,6 +693,10 @@ take_down_dock (void)
   if (dock.dock && dock.dock_alloc_id)
     g_signal_handler_disconnect (dock.dock, dock.dock_alloc_id);
   dock.dock_alloc_id = 0;
+  if (dock.config_monitor) {
+    g_file_monitor_cancel (dock.config_monitor);
+    g_clear_object (&dock.config_monitor);
+  }
 
   /* Every original back in view, every copy gone. */
   if (dock.pairs) {

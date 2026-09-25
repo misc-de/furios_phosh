@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: MIT
  *
  * The folders of phosh's app overview, held in a bar at the bottom of the
- * screen instead of scrolling away with the apps.
+ * screen instead of scrolling away with the apps - lying over them, so the
+ * apps pass underneath it.
  *
  * phosh has no place for this. Folders and apps share one GtkFlowBox inside
  * the scrolled area, GTK 3's CSS can neither reorder nor pin anything, and
@@ -84,6 +85,24 @@ typedef struct {
   gulong      alloc_id;
   guint       guard_id;
   gboolean    refused;
+
+  /* Floating: the dock lies over the scrolled area in an overlay of ours,
+     which takes the scrolled window's place in phosh's column. Everything
+     needed to put that back exactly as it was. */
+  GtkWidget  *overlay;    /* weak */
+  GtkWidget  *scrolled;   /* weak */
+  GtkWidget  *column;     /* weak */
+  int         position;
+  gboolean    expand, fill;
+  guint       padding;
+  GtkPackType pack;
+
+  /* The scrolled content gets room at its end as tall as the dock, or its
+     last row could never be scrolled out from under it. */
+  GtkWidget  *content;    /* weak */
+  int         content_margin;
+  guint       pad_id;
+  gulong      dock_alloc_id;
 } Dock;
 
 static Dock dock;
@@ -184,6 +203,7 @@ on_guard_clear (gpointer user_data)
 /* --- moving buttons ------------------------------------------------------ */
 
 static void on_origin_destroyed (GtkWidget *child, gpointer user_data);
+static void queue_pad (void);
 
 static void
 put_back (GtkWidget *button)
@@ -296,6 +316,7 @@ sync_dock (void)
   g_list_free (children);
 
   gtk_widget_set_visible (dock.dock, dock.moved->len > 0);
+  queue_pad ();
 }
 
 
@@ -313,6 +334,39 @@ on_origin_destroyed (GtkWidget *child, gpointer user_data)
 {
   if (dock.sync_id == 0 && dock.flow)
     dock.sync_id = g_idle_add (on_sync_idle, NULL);
+}
+
+
+static gboolean
+on_pad_idle (gpointer user_data)
+{
+  int want;
+
+  dock.pad_id = 0;
+  if (!dock.content)
+    return G_SOURCE_REMOVE;
+  want = dock.content_margin;
+  if (dock.dock && gtk_widget_get_visible (dock.dock))
+    want += gtk_widget_get_allocated_height (dock.dock);
+  /* Only on a change: a new margin allocates again, and that calls here. */
+  if (gtk_widget_get_margin_bottom (dock.content) != want)
+    gtk_widget_set_margin_bottom (dock.content, want);
+  return G_SOURCE_REMOVE;
+}
+
+
+static void
+queue_pad (void)
+{
+  if (dock.pad_id == 0)
+    dock.pad_id = g_idle_add (on_pad_idle, NULL);
+}
+
+
+static void
+on_dock_allocated (GtkWidget *widget, GdkRectangle *alloc, gpointer user_data)
+{
+  queue_pad ();
 }
 
 
@@ -335,7 +389,8 @@ build_dock (GtkWidget *grid)
   GtkWidget *apps = find_by_name (grid, APPS_ID);
   GtkWidget *scrolled = find_by_name (grid, SCROLLED_ID);
   GtkWidget *column = scrolled ? gtk_widget_get_parent (scrolled) : NULL;
-  GtkWidget *sep;
+  GtkWidget *content;
+  GtkCssProvider *css;
 
   if (!GTK_IS_FLOW_BOX (apps) || !GTK_IS_SCROLLED_WINDOW (scrolled) || !GTK_IS_BOX (column)) {
     g_warning (PLUGIN_NAME ": the app grid is not the shape this was written for - "
@@ -357,11 +412,19 @@ build_dock (GtkWidget *grid)
   g_object_add_weak_pointer (G_OBJECT (apps), (gpointer *) &dock.apps);
 
   dock.dock = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_set_valign (dock.dock, GTK_ALIGN_END);
   gtk_style_context_add_class (gtk_widget_get_style_context (dock.dock), PLUGIN_NAME);
-  sep = gtk_separator_new (GTK_ORIENTATION_HORIZONTAL);
-  gtk_widget_set_margin_start (sep, 6);
-  gtk_widget_set_margin_end (sep, 6);
-  gtk_container_add (GTK_CONTAINER (dock.dock), sep);
+  /* The apps pass underneath, so the bar needs a ground of its own to be
+     read against - the theme's, not quite opaque. On this one widget only. */
+  css = gtk_css_provider_new ();
+  gtk_css_provider_load_from_data (css,
+                                   "." PLUGIN_NAME " {"
+                                   " background-color: alpha(@theme_bg_color, 0.85); }",
+                                   -1, NULL);
+  gtk_style_context_add_provider (gtk_widget_get_style_context (dock.dock),
+                                  GTK_STYLE_PROVIDER (css),
+                                  GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  g_object_unref (css);
 
   /* The same spacing and margins as phosh's own grid, so the folders look
      the same down here as they did up there. */
@@ -383,11 +446,45 @@ build_dock (GtkWidget *grid)
   gtk_widget_show_all (dock.dock);
   gtk_widget_set_no_show_all (dock.dock, TRUE);
 
-  /* After the scrolled area, which takes all the height it can - so this
-     sits at the bottom edge and the apps scroll above it. */
-  gtk_box_pack_start (GTK_BOX (column), dock.dock, FALSE, FALSE, 0);
+  /* The scrolled window moves into an overlay of ours, at its own place in
+     the column and with its own packing, and the dock lies over its bottom
+     edge. */
+  gtk_container_child_get (GTK_CONTAINER (column), scrolled,
+                           "position", &dock.position, NULL);
+  gtk_box_query_child_packing (GTK_BOX (column), scrolled, &dock.expand,
+                               &dock.fill, &dock.padding, &dock.pack);
+  dock.overlay = gtk_overlay_new ();
+  g_object_ref (scrolled);
+  gtk_container_remove (GTK_CONTAINER (column), scrolled);
+  gtk_container_add (GTK_CONTAINER (dock.overlay), scrolled);
+  g_object_unref (scrolled);
+  gtk_overlay_add_overlay (GTK_OVERLAY (dock.overlay), dock.dock);
+  gtk_box_pack_start (GTK_BOX (column), dock.overlay, dock.expand, dock.fill, dock.padding);
+  gtk_box_set_child_packing (GTK_BOX (column), dock.overlay, dock.expand,
+                             dock.fill, dock.padding, dock.pack);
+  gtk_box_reorder_child (GTK_BOX (column), dock.overlay, dock.position);
+  gtk_widget_show (dock.overlay);
+
+  dock.scrolled = scrolled;
+  dock.column = column;
+  g_object_add_weak_pointer (G_OBJECT (scrolled), (gpointer *) &dock.scrolled);
+  g_object_add_weak_pointer (G_OBJECT (column), (gpointer *) &dock.column);
+  g_object_add_weak_pointer (G_OBJECT (dock.overlay), (gpointer *) &dock.overlay);
   g_object_add_weak_pointer (G_OBJECT (dock.dock), (gpointer *) &dock.dock);
   g_object_add_weak_pointer (G_OBJECT (dock.flow), (gpointer *) &dock.flow);
+
+  /* The box inside the scrolled window - through the viewport GTK puts
+     around anything that cannot scroll by itself. */
+  content = gtk_bin_get_child (GTK_BIN (scrolled));
+  if (GTK_IS_VIEWPORT (content))
+    content = gtk_bin_get_child (GTK_BIN (content));
+  if (content) {
+    dock.content = content;
+    dock.content_margin = gtk_widget_get_margin_bottom (content);
+    g_object_add_weak_pointer (G_OBJECT (content), (gpointer *) &dock.content);
+  }
+  dock.dock_alloc_id = g_signal_connect_after (dock.dock, "size-allocate",
+                                               G_CALLBACK (on_dock_allocated), NULL);
 
   dock.alloc_id = g_signal_connect_after (apps, "size-allocate",
                                           G_CALLBACK (on_apps_allocated), NULL);
@@ -413,9 +510,16 @@ take_down_dock (void)
     g_source_remove (dock.sync_id);
     dock.sync_id = 0;
   }
+  if (dock.pad_id) {
+    g_source_remove (dock.pad_id);
+    dock.pad_id = 0;
+  }
   if (dock.apps && dock.alloc_id)
     g_signal_handler_disconnect (dock.apps, dock.alloc_id);
   dock.alloc_id = 0;
+  if (dock.dock && dock.dock_alloc_id)
+    g_signal_handler_disconnect (dock.dock, dock.dock_alloc_id);
+  dock.dock_alloc_id = 0;
 
   if (dock.moved) {
     for (guint i = 0; i < dock.moved->len; i++) {
@@ -432,6 +536,33 @@ take_down_dock (void)
 
   if (dock.dock)
     gtk_widget_destroy (dock.dock);
+
+  /* The scrolled window back into phosh's column, where and how it was. */
+  if (dock.scrolled && dock.overlay && dock.column &&
+      gtk_widget_get_parent (dock.scrolled) == dock.overlay) {
+    GtkWidget *scrolled = g_object_ref (dock.scrolled);
+
+    gtk_container_remove (GTK_CONTAINER (dock.overlay), scrolled);
+    gtk_widget_destroy (dock.overlay);
+    gtk_box_pack_start (GTK_BOX (dock.column), scrolled, dock.expand, dock.fill, dock.padding);
+    gtk_box_set_child_packing (GTK_BOX (dock.column), scrolled, dock.expand,
+                               dock.fill, dock.padding, dock.pack);
+    gtk_box_reorder_child (GTK_BOX (dock.column), scrolled, dock.position);
+    g_object_unref (scrolled);
+  } else if (dock.overlay) {
+    gtk_widget_destroy (dock.overlay);
+  }
+  if (dock.content) {
+    gtk_widget_set_margin_bottom (dock.content, dock.content_margin);
+    g_object_remove_weak_pointer (G_OBJECT (dock.content), (gpointer *) &dock.content);
+    dock.content = NULL;
+  }
+  if (dock.scrolled)
+    g_object_remove_weak_pointer (G_OBJECT (dock.scrolled), (gpointer *) &dock.scrolled);
+  if (dock.column)
+    g_object_remove_weak_pointer (G_OBJECT (dock.column), (gpointer *) &dock.column);
+  dock.scrolled = dock.column = NULL;
+
   if (dock.grid)
     g_object_remove_weak_pointer (G_OBJECT (dock.grid), (gpointer *) &dock.grid);
   if (dock.apps)

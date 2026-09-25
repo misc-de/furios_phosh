@@ -149,21 +149,50 @@ count_children (GtkWidget *flow, gboolean folders_only, gboolean visible_only)
 }
 
 
-static GtkWidget *
-find_dock (GtkWidget *column)
+static void
+count_docks_cb (GtkWidget *widget, gpointer user_data)
 {
-  GList *children = gtk_container_get_children (GTK_CONTAINER (column));
-  GtkWidget *found = NULL;
+  GPtrArray *found = user_data;
 
-  for (GList *l = children; l; l = l->next)
-    if (gtk_style_context_has_class (gtk_widget_get_style_context (l->data), PLUGIN_NAME))
-      found = l->data;
-  g_list_free (children);
+  if (gtk_style_context_has_class (gtk_widget_get_style_context (widget), PLUGIN_NAME))
+    g_ptr_array_add (found, widget);
+  if (GTK_IS_CONTAINER (widget))
+    gtk_container_forall (GTK_CONTAINER (widget), count_docks_cb, found);
+}
+
+
+static GPtrArray *
+docks_in (GtkWidget *root)
+{
+  GPtrArray *found = g_ptr_array_new ();
+
+  gtk_container_forall (GTK_CONTAINER (root), count_docks_cb, found);
   return found;
 }
 
 
-/* The flowbox inside the dock: the last child of its vertical box. */
+static GtkWidget *
+find_dock (GtkWidget *column)
+{
+  GPtrArray *found = docks_in (column);
+  GtkWidget *dock = found->len ? g_ptr_array_index (found, 0) : NULL;
+
+  g_ptr_array_free (found, TRUE);
+  return dock;
+}
+
+
+static int
+position_in (GtkWidget *box, GtkWidget *child)
+{
+  int pos = -1;
+
+  gtk_container_child_get (GTK_CONTAINER (box), child, "position", &pos, NULL);
+  return pos;
+}
+
+
+/* The flowbox inside the dock: the only child of its vertical box. */
 static GtkWidget *
 dock_flow (GtkWidget *dock)
 {
@@ -254,7 +283,7 @@ main (int argc, char *argv[])
   gtk_container_add (GTK_CONTAINER (inner), apps);
   gtk_container_add (GTK_CONTAINER (scrolled), inner);
   gtk_container_add (GTK_CONTAINER (column), search);
-  gtk_container_add (GTK_CONTAINER (column), scrolled);
+  gtk_box_pack_start (GTK_BOX (column), scrolled, TRUE, TRUE, 0);
   gtk_container_add (GTK_CONTAINER (grid), column);
   gtk_container_add (GTK_CONTAINER (window), grid);
 
@@ -305,8 +334,21 @@ main (int argc, char *argv[])
   check ("a dock under the scrolled area", dock != NULL);
   if (!dock)
     return 1;
-  check ("and it is the last thing in the column, so it sits at the bottom",
-         g_list_last (gtk_container_get_children (GTK_CONTAINER (column)))->data == dock);
+  {
+    GtkWidget *overlay = gtk_widget_get_parent (dock);
+    gboolean expand = FALSE;
+
+    check ("it lies in an overlay over the scrolled area",
+           GTK_IS_OVERLAY (overlay) && gtk_bin_get_child (GTK_BIN (overlay)) == scrolled);
+    check ("the overlay takes the scrolled window's place in the column",
+           gtk_widget_get_parent (overlay) == column && position_in (column, overlay) == 1);
+    gtk_box_query_child_packing (GTK_BOX (column), overlay, &expand, NULL, NULL, NULL);
+    check ("and its packing: all the height there is", expand);
+    check ("the dock hangs at the bottom edge", gtk_widget_get_valign (dock) == GTK_ALIGN_END);
+    check ("the apps get room at the end as tall as the dock, to scroll out from under it",
+           gtk_widget_get_allocated_height (dock) > 0 &&
+           gtk_widget_get_margin_bottom (inner) == gtk_widget_get_allocated_height (dock));
+  }
   check ("both folders are in it", count_children (dock_flow (dock), TRUE, FALSE) == 2);
   check ("no folder is left visible in the grid", count_children (apps, TRUE, TRUE) == 0);
   check ("the apps stay where they were", count_children (apps, FALSE, TRUE) == 2);
@@ -332,14 +374,10 @@ main (int argc, char *argv[])
   g_object_ref_sink (two);
   settle ();
   {
-    int docks = 0;
-    GList *children = gtk_container_get_children (GTK_CONTAINER (column));
+    GPtrArray *docks = docks_in (column);
 
-    for (GList *l = children; l; l = l->next)
-      if (gtk_style_context_has_class (gtk_widget_get_style_context (l->data), PLUGIN_NAME))
-        docks++;
-    g_list_free (children);
-    check ("a second instance does not build a second dock", docks == 1);
+    check ("a second instance does not build a second dock", docks->len == 1);
+    g_ptr_array_free (docks, TRUE);
   }
 
   gtk_widget_destroy (one);
@@ -349,6 +387,17 @@ main (int argc, char *argv[])
   gtk_widget_destroy (two);
   settle ();
   check ("the last one gone takes the dock with it", find_dock (column) == NULL);
+  {
+    gboolean expand = FALSE;
+
+    check ("the scrolled window is back in the column, at its place",
+           gtk_widget_get_parent (scrolled) == column && position_in (column, scrolled) == 1);
+    gtk_box_query_child_packing (GTK_BOX (column), scrolled, &expand, NULL, NULL, NULL);
+    check ("with its packing", expand);
+    check ("no overlay is left behind",
+           g_list_length (gtk_container_get_children (GTK_CONTAINER (column))) == 2);
+    check ("and the room at the end of the apps is gone", gtk_widget_get_margin_bottom (inner) == 0);
+  }
   check ("and a dock taken down in good order clears the crash mark",
          !g_file_test (guard, G_FILE_TEST_EXISTS));
   check ("every folder is back in the grid", count_children (apps, TRUE, TRUE) == 2);

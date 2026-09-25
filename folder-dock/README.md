@@ -1,16 +1,18 @@
 # phosh-folder-dock
 
 Holds the folders of phosh's app overview in a bar at the bottom edge of the
-screen, so they stay put while the apps scroll above them.
+screen. The bar lies over the apps, which scroll underneath it; the apps get
+room at their end as tall as the bar, so the last row still comes clear.
 
 phosh has no setting or plugin type for this: folders and apps share one
 `GtkFlowBox` inside the scrolled area, and GTK 3's CSS can neither reorder nor
 pin anything. So this is a status-icon plugin that shows nothing in the top
-bar. While it is loaded it finds `PhoshAppGrid` in the shell's windows, adds a
-bar under the scrolled area and **moves** phosh's own folder buttons into it.
+bar. While it is loaded it finds `PhoshAppGrid` in the shell's windows, puts
+the scrolled area into an overlay of its own (same place, same packing), lays
+a bar over its bottom edge and **moves** phosh's own folder buttons into it.
 A moved button still opens its folder, because the connection that does that
 travels with the widget. When the plugin is switched off, every button goes
-back where it came from.
+back where it came from, and so does the scrolled area.
 
 This depends on the inside of phosh's app grid (checked against phosh 0.55):
 the ids `apps` and `scrolled_window` from `app-grid.ui` and the type names

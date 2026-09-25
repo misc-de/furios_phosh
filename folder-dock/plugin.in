@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+#
+# Written by the Makefile: @PLUGIN_DIR@ is where phosh's own
+# pkg-config file says status-icon plugins live.
+[Plugin]
+Id=furios-folder-dock
+Name=Folders at the bottom
+Types=status-icon;
+Comment=Holds the app overview's folders in a bar at the bottom edge; shows nothing in the top bar
+Plugin=@PLUGIN_DIR@/libphosh-plugin-furios-folder-dock.so

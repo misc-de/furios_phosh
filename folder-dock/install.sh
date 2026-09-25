@@ -41,9 +41,9 @@ DIR=$(pkg-config --variable=status_icons_plugins_dir phosh-plugins)
 echo
 echo "Installed in $DIR."
 # Installed, not switched on: the switch is in the
-# misc-de app under "Other", or:
+# misc-de app under "Phosh", or:
 #   gsettings set mobi.phosh.shell.plugins status-icons "[..., 'furios-folder-dock']"
-echo "Switch it on in the misc-de app under \"Other\" -> \"Folders at the bottom\"."
+echo "Switch it on in the misc-de app under \"Phosh\" -> \"Folders at the bottom\"."
 echo
 echo "phosh looks for plugins only when it starts, so this one is picked up"
 echo "at the next reboot. After that the switch takes effect at once."

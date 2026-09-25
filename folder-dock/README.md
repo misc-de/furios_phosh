@@ -1,21 +1,40 @@
-# phosh-folder-dock
+# folder-dock
 
 Holds the folders of phosh's app overview in a bar at the bottom edge of the
-screen. The bar lies over the apps, which scroll underneath it, and has no
-background of its own, so they show through; the apps get room at their end
-as tall as the bar, so the last row still comes clear.
+screen, under the same line phosh draws below its favorites. The bar lies
+over the apps, which scroll underneath it blurred; the apps get room at their
+end as tall as the bar, so the last row still comes clear.
 
-## One row
+GTK 3 has no backdrop blur, so the plugin draws its overlay itself: the apps
+everywhere except under the bar, then a copy of what lies under the bar,
+drawn at a quarter of the size, box-blurred and scaled back up, then the
+bar. The rectangle has to be left out of the sharp drawing - the copy is
+partly clear where icons lay over the wallpaper, and the sharp ones would
+show through. The wallpaper itself stays sharp: phosh draws it on a surface
+of its own that nothing in here reaches.
+
+## Settings
+
+By default the folders take as many rows as they need, and every app shows
+its name. With
 
 By default the folders take as many rows as they need. With
 
     # ~/.config/furios-folder-dock.conf
     [dock]
     one-row=true
+    hide-labels=true
 
-they stand in a single row that scrolls sideways. The plugin watches the
-file while the dock stands, so a change takes effect at once; the misc-de
-app writes it (Other -> "Folders in one row").
+the folders stand in a single row that scrolls sideways (without a
+scrollbar), and the apps in the overview show only their icons, the way
+phosh shows its favorites: the plugin hides the button's `label` child, the
+same widget phosh hides for a favorite. Folders keep their names, and so do
+the apps inside a folder - that is a flowbox of its own, which the plugin
+never looks into.
+
+The plugin watches the file while the dock stands, so a change takes effect
+at once; the misc-de app writes it (Phosh -> "Folders in one row", "Hide app
+names"). Switching the dock off gives every name back.
 
 phosh has no setting or plugin type for this: folders and apps share one
 `GtkFlowBox` inside the scrolled area, and GTK 3's CSS can neither reorder nor
@@ -34,7 +53,8 @@ folders through. When the plugin is switched off, the copies go, the
 originals come back into view, and the scrolled area goes back where it was.
 
 This depends on the inside of phosh's app grid (checked against phosh 0.55):
-the ids `apps` and `scrolled_window` from `app-grid.ui`, the type names
+the ids `apps` and `scrolled_window` from `app-grid.ui`, `label` from
+`app-grid-base-button.ui`, the type names
 `PhoshAppGrid` and `PhoshAppGridFolderButton`, and the folder button's
 `folder-info` property and `folder-launched` signal. If the grid does not look like
 that, the plugin logs one warning and leaves it alone.
@@ -56,7 +76,7 @@ and write the rest back with `gsettings set`, or run `./uninstall.sh`.
 ## Install, switch on, test
 
     ./install.sh                # WITHOUT sudo; picked up at the next reboot
-    # then: misc-de app -> Other -> Folders at the bottom
+    # then: misc-de app -> Phosh -> Folders at the bottom
     ./tests/run-tests.sh        # NEVER with sudo
 
 The test builds the app grid's shape as phosh 0.55 has it (the folder button
@@ -65,7 +85,10 @@ show in the dock and still open, that every child of phosh's flowbox stays
 at the index of its own item, that the dock follows the model when
 phosh adds or drops a folder, that a second instance builds no second dock,
 that everything goes back when the last one goes, and that a leftover crash
-mark keeps the grid untouched.
+mark keeps the grid untouched. It renders the overlay over a checkerboard with
+clear squares and checks that the apps stay sharp above the bar and that
+nothing sharp shows through under it, and that hidden names stay hidden for
+apps added later while folders keep theirs.
 
 ## Uninstall
 

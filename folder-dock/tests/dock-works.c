@@ -129,6 +129,17 @@ folder_class_init (gpointer klass, gpointer class_data)
 }
 
 
+/* The name under a button, by the id phosh's template gives it. */
+static GtkWidget *
+named_label (const char *text)
+{
+  GtkWidget *label = gtk_label_new (text);
+
+  gtk_buildable_set_name (GTK_BUILDABLE (label), "label");
+  return label;
+}
+
+
 /* The button inside, as in the template: pressing it is "folder-launched". */
 static void
 on_inner_clicked (GtkButton *inner, GtkWidget *folder)
@@ -143,8 +154,9 @@ folder_init (GTypeInstance *instance, gpointer klass)
   GtkWidget *inner = gtk_button_new ();
 
   g_signal_connect (inner, "clicked", G_CALLBACK (on_inner_clicked), instance);
+  gtk_container_add (GTK_CONTAINER (inner), named_label ("Folder"));
   gtk_container_add (GTK_CONTAINER (instance), inner);
-  gtk_widget_show (inner);
+  gtk_widget_show_all (inner);
 }
 
 
@@ -191,9 +203,15 @@ create_child (gpointer item, gpointer user_data)
     child = g_object_new (folder_type, "folder-info", item, NULL);
     g_signal_connect (child, "folder-launched", G_CALLBACK (on_folder_launched), NULL);
   } else {
+    GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
+    GtkWidget *button = gtk_button_new ();
+
+    gtk_container_add (GTK_CONTAINER (box), gtk_image_new_from_icon_name ("app-icon-unknown",
+                                                                          GTK_ICON_SIZE_DIALOG));
+    gtk_container_add (GTK_CONTAINER (box), named_label (g_object_get_data (item, "name")));
+    gtk_container_add (GTK_CONTAINER (button), box);
     child = gtk_flow_box_child_new ();
-    gtk_container_add (GTK_CONTAINER (child),
-                       gtk_button_new_with_label (g_object_get_data (item, "name")));
+    gtk_container_add (GTK_CONTAINER (child), button);
   }
   g_object_set_data (G_OBJECT (child), "item", item);
   gtk_widget_show_all (child);
@@ -234,6 +252,41 @@ count_children (GtkWidget *flow, gboolean folders_only, gboolean visible_only)
     if (folders_only && !G_TYPE_CHECK_INSTANCE_TYPE (l->data, folder_type))
       continue;
     n++;
+  }
+  g_list_free (children);
+  return n;
+}
+
+
+static void
+find_label_cb (GtkWidget *widget, gpointer user_data)
+{
+  GtkWidget **found = user_data;
+  const char *name = gtk_buildable_get_name (GTK_BUILDABLE (widget));
+
+  if (*found)
+    return;
+  if (name && strcmp (name, "label") == 0)
+    *found = widget;
+  else if (GTK_IS_CONTAINER (widget))
+    gtk_container_forall (GTK_CONTAINER (widget), find_label_cb, found);
+}
+
+
+/* Names showing, on the folders or on the apps of a flowbox. */
+static int
+names_showing (GtkWidget *flow, gboolean folders)
+{
+  GList *children = gtk_container_get_children (GTK_CONTAINER (flow));
+  int n = 0;
+
+  for (GList *l = children; l; l = l->next) {
+    GtkWidget *label = NULL;
+
+    if (G_TYPE_CHECK_INSTANCE_TYPE (l->data, folder_type) != folders)
+      continue;
+    find_label_cb (l->data, &label);
+    n += label && gtk_widget_get_visible (label);
   }
   g_list_free (children);
   return n;
@@ -385,6 +438,47 @@ first_folder_in (GtkWidget *flow)
   }
   g_list_free (children);
   return found;
+}
+
+
+/* Hard red squares with nothing between them, all over the scrolled area,
+   the way icons lie over the wallpaper: sharp wherever they are drawn as
+   they are, half-clear wherever something blurred them - and pure red
+   again where a blurred copy lies over sharp ones. */
+static gboolean
+paint_checker (GtkWidget *widget, cairo_t *cr, gpointer user_data)
+{
+  int w = gtk_widget_get_allocated_width (widget);
+  int h = gtk_widget_get_allocated_height (widget);
+
+  for (int y = 0; y < h; y += 8)
+    for (int x = 0; x < w; x += 8) {
+      if (((x + y) / 8) % 2 == 0)
+        continue;
+      cairo_set_source_rgb (cr, 1, 0, 0);
+      cairo_rectangle (cr, x, y, 8, 8);
+      cairo_fill (cr);
+    }
+  return FALSE;
+}
+
+
+/* Pure red pixels in a band of the rendered overlay. */
+static int
+pure_pixels (cairo_surface_t *surface, int top, int bottom)
+{
+  int stride = cairo_image_surface_get_stride (surface);
+  int width = cairo_image_surface_get_width (surface);
+  guchar *data = cairo_image_surface_get_data (surface);
+  int n = 0;
+
+  for (int y = top; y < bottom; y++)
+    for (int x = 0; x < width; x++) {
+      guint32 px = *(guint32 *) (data + y * stride + x * 4);
+
+      n += px == 0xffff0000;
+    }
+  return n;
 }
 
 
@@ -567,6 +661,37 @@ main (int argc, char *argv[])
          see_through (dock) && see_through (dock_scroller (dock)) &&
          see_through (gtk_bin_get_child (GTK_BIN (dock_scroller (dock)))));
 
+  /* Under the bar the apps are drawn blurred, and only blurred: the sharp
+     ones are left out there, or they would show through the copy. */
+  {
+    GtkWidget *overlay = gtk_widget_get_parent (dock);
+    gulong id = g_signal_connect_after (scrolled, "draw", G_CALLBACK (paint_checker), NULL);
+    int w, h, dock_h;
+    cairo_surface_t *surface;
+    cairo_t *cr;
+
+    /* Room above the bar, or there is nothing to compare with. */
+    gtk_widget_set_size_request (scrolled, -1, 3 * gtk_widget_get_allocated_height (dock));
+    settle ();
+    w = gtk_widget_get_allocated_width (overlay);
+    h = gtk_widget_get_allocated_height (overlay);
+    dock_h = gtk_widget_get_allocated_height (dock);
+    surface = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, w, h);
+    cr = cairo_create (surface);
+
+    gtk_widget_draw (overlay, cr);
+    cairo_destroy (cr);
+    cairo_surface_flush (surface);
+    check ("above the bar the apps stay sharp",
+           pure_pixels (surface, 0, h - dock_h) > (h - dock_h) * w / 4);
+    check ("under the bar they are blurred, with nothing sharp showing through",
+           dock_h > 0 && pure_pixels (surface, h - dock_h, h) == 0);
+    cairo_surface_destroy (surface);
+    g_signal_handler_disconnect (scrolled, id);
+    gtk_widget_set_size_request (scrolled, -1, -1);
+    settle ();
+  }
+
   /* Many folders: in rows by default, in one line with the setting - which
      the app writes while the dock stands. */
   for (int i = 0; i < 10; i++)
@@ -596,6 +721,32 @@ main (int argc, char *argv[])
     settle ();
     check ("and the file gone means rows as well", !one_line (dock_flow (dock)));
   }
+
+  /* The apps without their names, the way phosh shows its favorites; the
+     folders keep theirs, in the grid and in the dock. */
+  {
+    int apps_n = count_children (apps, FALSE, FALSE) - count_children (apps, TRUE, FALSE);
+    int folders_n = count_children (apps, TRUE, FALSE);
+
+    check ("every app shows its name by default", apps_n > 0 && names_showing (apps, FALSE) == apps_n);
+    write_config (config, "[dock]\nhide-labels=true\n");
+    settle ();
+    check ("with hide-labels set, no app shows its name", names_showing (apps, FALSE) == 0);
+    check ("the folders keep theirs", names_showing (apps, TRUE) == folders_n &&
+           names_showing (dock_flow (dock), TRUE) == count_children (dock_flow (dock), TRUE, FALSE));
+    store_append (store, "Late", FALSE);
+    settle ();
+    check ("an app added later comes without its name too", names_showing (apps, FALSE) == 0);
+    check ("and one-row is left alone by it", !one_line (dock_flow (dock)));
+    write_config (config, NULL);
+    settle ();
+    check ("the file gone, every app has its name back",
+           names_showing (apps, FALSE) == apps_n + 1);
+    g_list_store_remove (store, g_list_model_get_n_items (G_LIST_MODEL (store)) - 1);
+    settle ();
+    write_config (config, "[dock]\nhide-labels=true\n");
+    settle ();
+  }
   g_list_store_splice (store, g_list_model_get_n_items (G_LIST_MODEL (store)) - 10, 10, NULL, 0);
   settle ();
   check ("the extra folders gone, two are left",
@@ -620,6 +771,9 @@ main (int argc, char *argv[])
   gtk_widget_destroy (two);
   settle ();
   check ("the last one gone takes the dock with it", find_dock (column) == NULL);
+  check ("and gives every app its name back, the setting still on",
+         names_showing (apps, FALSE) == count_children (apps, FALSE, FALSE) - count_children (apps, TRUE, FALSE));
+  write_config (config, NULL);
   {
     gboolean expand = FALSE;
 

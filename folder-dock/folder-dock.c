@@ -69,14 +69,23 @@ GType phosh_status_icon_get_type (void);
 #define GUARD_CLEAR_S      15
 
 /*
- * The one setting, written by the misc-de app: all folders in a single row
- * that scrolls sideways, instead of as many rows as they need. A key file
- * in the config directory, watched while the dock stands, so the switch
- * takes effect at once. No file or no key means the rows as before.
+ * The settings, written by the misc-de app: all folders in a single row
+ * that scrolls sideways, instead of as many rows as they need; and the apps
+ * in the overview without their names, the way phosh shows its favorites.
+ * A key file in the config directory, watched while the dock stands, so
+ * the switches take effect at once. No file or no key means phosh's own
+ * look.
  */
 #define CONFIG_FILE        "furios-folder-dock.conf"
 #define CONFIG_GROUP       "dock"
 #define CONFIG_ONE_ROW     "one-row"
+#define CONFIG_NO_LABELS   "hide-labels"
+
+/* The name under an app button, as phosh's app-grid-base-button.ui calls
+   it. phosh hides exactly this widget for its favorites. The mark says we
+   hid it, so only those come back. */
+#define LABEL_ID           "label"
+#define HID_LABEL          "furios-folder-dock-hid-label"
 #define MAX_PER_LINE       8
 
 /* The app grid is built with the overview, which may come after the top bar.
@@ -126,6 +135,7 @@ typedef struct {
 
   GFileMonitor *config_monitor;
   gboolean    one_row;
+  gboolean    no_labels;
 } Dock;
 
 static Dock dock;
@@ -367,14 +377,45 @@ config_path (void)
 
 
 static gboolean
-read_one_row (void)
+read_setting (const char *key)
 {
   g_autofree char *path = config_path ();
   g_autoptr (GKeyFile) file = g_key_file_new ();
 
   if (!g_key_file_load_from_file (file, path, G_KEY_FILE_NONE, NULL))
     return FALSE;
-  return g_key_file_get_boolean (file, CONFIG_GROUP, CONFIG_ONE_ROW, NULL);
+  return g_key_file_get_boolean (file, CONFIG_GROUP, key, NULL);
+}
+
+
+/* The app buttons in the overview's grid, with or without their names.
+   Folders keep theirs, and so does everything inside a folder - that is a
+   flowbox of its own, which this never looks into. */
+static void
+apply_labels (void)
+{
+  GList *children;
+
+  if (!dock.apps)
+    return;
+  children = gtk_container_get_children (GTK_CONTAINER (dock.apps));
+  for (GList *l = children; l; l = l->next) {
+    GtkWidget *label;
+
+    if (is_type (l->data, FOLDER_BUTTON_TYPE))
+      continue;
+    label = find_by_name (l->data, LABEL_ID);
+    if (!label)
+      continue;
+    if (dock.no_labels && gtk_widget_get_visible (label)) {
+      gtk_widget_hide (label);
+      g_object_set_data (G_OBJECT (label), HID_LABEL, GINT_TO_POINTER (TRUE));
+    } else if (!dock.no_labels && g_object_get_data (G_OBJECT (label), HID_LABEL)) {
+      g_object_set_data (G_OBJECT (label), HID_LABEL, NULL);
+      gtk_widget_show (label);
+    }
+  }
+  g_list_free (children);
 }
 
 
@@ -394,8 +435,9 @@ apply_layout (void)
                   "max-children-per-line", MAX (n, MAX_PER_LINE),
                   "min-children-per-line", n,
                   NULL);
+    /* EXTERNAL: still swipes sideways, but never draws a scrollbar. */
     gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (dock.scroller),
-                                    GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+                                    GTK_POLICY_EXTERNAL, GTK_POLICY_NEVER);
   } else {
     g_object_set (dock.flow,
                   "min-children-per-line", 0,
@@ -416,10 +458,15 @@ on_config_changed (GFileMonitor *monitor, GFile *file, GFile *other,
 
   if (event == G_FILE_MONITOR_EVENT_ATTRIBUTE_CHANGED)
     return;
-  want = read_one_row ();
+  want = read_setting (CONFIG_ONE_ROW);
   if (want != dock.one_row) {
     dock.one_row = want;
     apply_layout ();
+  }
+  want = read_setting (CONFIG_NO_LABELS);
+  if (want != dock.no_labels) {
+    dock.no_labels = want;
+    apply_labels ();
   }
 }
 
@@ -437,6 +484,133 @@ plain (GtkWidget *widget)
                                   GTK_STYLE_PROVIDER (css),
                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
   g_object_unref (css);
+}
+
+
+/* How much smaller the copy is drawn, and how often it is box-blurred
+   there. Drawn small, blurred small and scaled up: a wide blur for the
+   cost of a narrow one. */
+#define BLUR_SHRINK   4
+#define BLUR_RADIUS   2
+#define BLUR_PASSES   2
+
+
+/* One box pass along one direction, on premultiplied ARGB, in place. */
+static void
+box_pass (guchar *data, int width, int height, int stride, gboolean across)
+{
+  int len = across ? width : height;
+  int lines = across ? height : width;
+  int step = across ? 4 : stride;
+  int line_step = across ? stride : 4;
+  g_autofree guchar *copy = g_malloc (len * 4);
+
+  for (int l = 0; l < lines; l++) {
+    guchar *row = data + l * line_step;
+
+    for (int i = 0; i < len; i++)
+      memcpy (copy + i * 4, row + i * step, 4);
+    for (int i = 0; i < len; i++) {
+      int sum[4] = { 0 }, n = 0;
+
+      for (int k = i - BLUR_RADIUS; k <= i + BLUR_RADIUS; k++) {
+        int j = CLAMP (k, 0, len - 1);
+
+        for (int c = 0; c < 4; c++)
+          sum[c] += copy[j * 4 + c];
+        n++;
+      }
+      for (int c = 0; c < 4; c++)
+        row[i * step + c] = sum[c] / n;
+    }
+  }
+}
+
+
+static void
+blur_surface (cairo_surface_t *surface)
+{
+  int width = cairo_image_surface_get_width (surface);
+  int height = cairo_image_surface_get_height (surface);
+  int stride = cairo_image_surface_get_stride (surface);
+  guchar *data;
+
+  cairo_surface_flush (surface);
+  data = cairo_image_surface_get_data (surface);
+  for (int p = 0; p < BLUR_PASSES; p++) {
+    box_pass (data, width, height, stride, TRUE);
+    box_pass (data, width, height, stride, FALSE);
+  }
+  cairo_surface_mark_dirty (surface);
+}
+
+
+/* Our overlay draws itself: the apps everywhere but under the dock, the
+   apps under the dock blurred, then the dock. Leaving the rectangle out
+   matters - the blurred copy is partly clear, where the icons lay over the
+   wallpaper, and sharp icons would show through it. It has to happen here:
+   GTK saves and restores the context around every draw handler, so a clip
+   set in a handler on the scrolled window is gone before it draws. */
+static gboolean
+on_overlay_draw (GtkWidget *overlay, cairo_t *cr, gpointer user_data)
+{
+  GtkAllocation rect, own;
+  cairo_surface_t *small;
+  cairo_pattern_t *pattern;
+  cairo_t *snap;
+  double scale;
+  int factor, width, height;
+
+  if (!dock.scrolled || gtk_widget_get_parent (dock.scrolled) != overlay)
+    return FALSE;
+  if (!dock.dock || !gtk_widget_get_visible (dock.dock))
+    return FALSE;
+  /* Not the dock's allocation: GtkOverlay gives each overlay child a
+     window of its own and allocates the child at 0,0 inside it. */
+  gtk_widget_get_allocation (overlay, &own);
+  rect.width = gtk_widget_get_allocated_width (dock.dock);
+  rect.height = gtk_widget_get_allocated_height (dock.dock);
+  if (rect.width <= 1 || rect.height <= 1 ||
+      !gtk_widget_translate_coordinates (dock.dock, overlay, 0, 0, &rect.x, &rect.y))
+    return FALSE;
+
+  cairo_save (cr);
+  cairo_set_fill_rule (cr, CAIRO_FILL_RULE_EVEN_ODD);
+  cairo_rectangle (cr, 0, 0, own.width, own.height);
+  cairo_rectangle (cr, rect.x, rect.y, rect.width, rect.height);
+  cairo_clip (cr);
+  gtk_container_propagate_draw (GTK_CONTAINER (overlay), dock.scrolled, cr);
+  cairo_restore (cr);
+
+  factor = gtk_widget_get_scale_factor (overlay);
+  scale = (double) factor / BLUR_SHRINK;
+  width = (rect.width * factor + BLUR_SHRINK - 1) / BLUR_SHRINK;
+  height = (rect.height * factor + BLUR_SHRINK - 1) / BLUR_SHRINK;
+  small = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, width, height);
+  snap = cairo_create (small);
+  cairo_scale (snap, scale, scale);
+  cairo_translate (snap, -rect.x, -rect.y);
+  cairo_rectangle (snap, rect.x, rect.y, rect.width, rect.height);
+  cairo_clip (snap);
+  gtk_container_propagate_draw (GTK_CONTAINER (overlay), dock.scrolled, snap);
+  cairo_destroy (snap);
+  blur_surface (small);
+
+  cairo_save (cr);
+  cairo_rectangle (cr, rect.x, rect.y, rect.width, rect.height);
+  cairo_clip (cr);
+  cairo_translate (cr, rect.x, rect.y);
+  cairo_scale (cr, 1 / scale, 1 / scale);
+  cairo_set_source_surface (cr, small, 0, 0);
+  pattern = cairo_get_source (cr);
+  cairo_pattern_set_filter (pattern, CAIRO_FILTER_GOOD);
+  cairo_pattern_set_extend (pattern, CAIRO_EXTEND_PAD);
+  cairo_paint (cr);
+  cairo_restore (cr);
+  cairo_surface_destroy (small);
+
+  gtk_container_propagate_draw (GTK_CONTAINER (overlay), dock.dock, cr);
+  return TRUE;
 }
 
 
@@ -479,6 +653,8 @@ sync_dock (void)
       hide_original (pair->original);
   }
   g_ptr_array_unref (originals);
+  /* New app buttons come without the setting: phosh builds them afresh. */
+  apply_labels ();
 
   gtk_widget_set_visible (dock.dock, dock.pairs->len > 0);
   if (!same)
@@ -556,6 +732,7 @@ build_dock (GtkWidget *grid)
   GtkWidget *scrolled = find_by_name (grid, SCROLLED_ID);
   GtkWidget *column = scrolled ? gtk_widget_get_parent (scrolled) : NULL;
   GtkWidget *content;
+  GtkWidget *sep;
 
   if (!GTK_IS_FLOW_BOX (apps) || !GTK_IS_SCROLLED_WINDOW (scrolled) || !GTK_IS_BOX (column)) {
     g_warning (PLUGIN_NAME ": the app grid is not the shape this was written for - "
@@ -581,8 +758,16 @@ build_dock (GtkWidget *grid)
   gtk_style_context_add_class (gtk_widget_get_style_context (dock.dock), PLUGIN_NAME);
   plain (dock.dock);
 
-  /* The same spacing and margins as phosh's own grid, so the folders look
-     the same down here as they did up there. */
+  /* The line phosh draws under the favorites, with the same inset; the
+     grid's CSS gives it colour and height. */
+  sep = gtk_separator_new (GTK_ORIENTATION_HORIZONTAL);
+  gtk_widget_set_margin_start (sep, 6);
+  gtk_widget_set_margin_end (sep, 6);
+  gtk_container_add (GTK_CONTAINER (dock.dock), sep);
+
+  /* The same spacing as phosh's own grid, so the folders look the same down
+     here as they did up there; 12 below the line like the apps under the
+     favorites, and 16 off the screen edge like the search bar's inset. */
   dock.flow = gtk_flow_box_new ();
   g_object_set (dock.flow,
                 "homogeneous", TRUE,
@@ -592,8 +777,8 @@ build_dock (GtkWidget *grid)
                 "row-spacing", 6,
                 "margin-start", 3,
                 "margin-end", 3,
-                "margin-top", 6,
-                "margin-bottom", 6,
+                "margin-top", 12,
+                "margin-bottom", 16,
                 "halign", GTK_ALIGN_CENTER,
                 "max-children-per-line", MAX_PER_LINE,
                 NULL);
@@ -616,6 +801,7 @@ build_dock (GtkWidget *grid)
   gtk_box_query_child_packing (GTK_BOX (column), scrolled, &dock.expand,
                                &dock.fill, &dock.padding, &dock.pack);
   dock.overlay = gtk_overlay_new ();
+  g_signal_connect (dock.overlay, "draw", G_CALLBACK (on_overlay_draw), NULL);
   g_object_ref (scrolled);
   gtk_container_remove (GTK_CONTAINER (column), scrolled);
   gtk_container_add (GTK_CONTAINER (dock.overlay), scrolled);
@@ -640,7 +826,8 @@ build_dock (GtkWidget *grid)
     g_autofree char *path = config_path ();
     g_autoptr (GFile) file = g_file_new_for_path (path);
 
-    dock.one_row = read_one_row ();
+    dock.one_row = read_setting (CONFIG_ONE_ROW);
+    dock.no_labels = read_setting (CONFIG_NO_LABELS);
     dock.config_monitor = g_file_monitor_file (file, G_FILE_MONITOR_NONE, NULL, NULL);
     if (dock.config_monitor)
       g_signal_connect (dock.config_monitor, "changed", G_CALLBACK (on_config_changed), NULL);
@@ -697,6 +884,10 @@ take_down_dock (void)
     g_file_monitor_cancel (dock.config_monitor);
     g_clear_object (&dock.config_monitor);
   }
+
+  /* Every name we hid back under its app. */
+  dock.no_labels = FALSE;
+  apply_labels ();
 
   /* Every original back in view, every copy gone. */
   if (dock.pairs) {

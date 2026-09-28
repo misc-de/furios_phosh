@@ -1,0 +1,103 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+#
+# Takes our plugins out of phosh when phosh keeps dying, so the phone falls
+# back to the shell as it shipped instead of having none.
+#
+# Our plugins are built against one phosh and loaded into whatever phosh a
+# FuriLabs update brings. phosh checks no version before loading them, and a
+# plugin that no longer fits takes the shell down with it. The shell unit
+# restarts three times in 15 s and then ends the session; phosh.service
+# starts a new one five seconds later, and the phone loops without a UI.
+#
+# Run as ExecStartPre of mobi.phosh.Shell.service (with "-", so nothing here
+# can keep the shell from starting). Two starts less than WINDOW seconds
+# apart mean the one before did not survive: every furios-* name comes out of
+# the plugin lists, and what was there is kept to be put back by hand once
+# the plugins are rebuilt:
+#
+#     furios-phosh-guard restore
+#
+# Only our names are touched. The shipped plugins stay as they were.
+set -u
+
+WINDOW=${FURIOS_PHOSH_GUARD_WINDOW:-60}
+STATE=${FURIOS_PHOSH_GUARD_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/furios-phosh-guard}
+SCHEMA=mobi.phosh.shell.plugins
+KEYS="status-icons plugins"
+GSETTINGS=${FURIOS_PHOSH_GUARD_GSETTINGS:-gsettings}
+
+log() {
+    printf 'furios-phosh-guard: %s\n' "$*" >&2
+    command -v logger >/dev/null 2>&1 && logger -t furios-phosh-guard "$*"
+    return 0
+}
+
+# A gsettings list without our names: ['a', 'furios-b', 'c'] -> ['a', 'c'].
+without_ours() {
+    printf '%s\n' "$1" | tr -d '[]' | tr ',' '\n' \
+        | sed "s/^[[:space:]]*//; s/[[:space:]]*\$//; s/^@as //" \
+        | grep -v "^'furios-" | grep -v '^$' | paste -sd, - \
+        | sed 's/,/, /g; s/^/[/; s/$/]/'
+}
+
+disable() {
+    local key cur new took=0
+    for key in $KEYS; do
+        cur=$($GSETTINGS get "$SCHEMA" "$key" 2>/dev/null) || continue
+        case "$cur" in *"'furios-"*) ;; *) continue ;; esac
+        new=$(without_ours "$cur")
+        [ "$new" = "[]" ] && new="@as []"
+        # Kept before it is changed, and never overwritten by a later loop:
+        # the first list saved is the one somebody chose.
+        [ -e "$STATE/$key" ] || printf '%s\n' "$cur" > "$STATE/$key"
+        if $GSETTINGS set "$SCHEMA" "$key" "$new" 2>/dev/null; then
+            log "phosh restarted within ${WINDOW}s - took our plugins out of $key (was: $cur)"
+            took=1
+        fi
+    done
+    [ "$took" = 1 ] && date '+%F %T' > "$STATE/disabled"
+    return 0
+}
+
+restore() {
+    local key done_any=0
+    for key in $KEYS; do
+        [ -r "$STATE/$key" ] || continue
+        if $GSETTINGS set "$SCHEMA" "$key" "$(cat "$STATE/$key")"; then
+            rm -f "$STATE/$key"
+            echo "restored $key"
+            done_any=1
+        fi
+    done
+    rm -f "$STATE/disabled"
+    [ "$done_any" = 1 ] || echo "nothing to restore"
+    return 0
+}
+
+mkdir -p "$STATE" 2>/dev/null || exit 0
+
+case "${1:-check}" in
+restore) restore; exit 0 ;;
+status)
+    if [ -e "$STATE/disabled" ]; then
+        echo "disabled since $(cat "$STATE/disabled") - phosh kept restarting"
+    else
+        echo "not triggered"
+    fi
+    exit 0 ;;
+check) ;;
+*) echo "usage: furios-phosh-guard [check|status|restore]" >&2; exit 2 ;;
+esac
+
+# Within one boot only: a phone switched off and on again quickly starts the
+# shell twice in a minute too, and that is not a crash.
+BOOT_ID=${FURIOS_PHOSH_GUARD_BOOT_ID:-$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)}
+now=$(date +%s)
+read -r last_boot last < "$STATE/last-start" 2>/dev/null || { last_boot=; last=; }
+printf '%s %s\n' "$BOOT_ID" "$now" > "$STATE/last-start"
+case "$last" in ''|*[!0-9]*) exit 0 ;; esac
+[ "$last_boot" = "$BOOT_ID" ] || exit 0
+[ $((now - last)) -lt "$WINDOW" ] && disable
+exit 0

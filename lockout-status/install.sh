@@ -37,6 +37,10 @@ make -C "$SRC" all
 echo "2) installing"
 sudo make -C "$SRC" install
 
+# The guard that takes our plugins out again if a phosh update makes the
+# shell crash on them - installed with every plugin of this repository.
+"$SRC/../guard/install.sh"
+
 DIR=$(pkg-config --variable=status_icons_plugins_dir phosh-plugins)
 echo
 echo "Installed in $DIR."

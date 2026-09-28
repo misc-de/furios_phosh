@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+#
+# Written by the Makefile: @PLUGIN_DIR@ is where phosh's own
+# pkg-config file says status-icon plugins live.
+[Plugin]
+Id=furios-lockout
+Name=Lock screen lockout
+Types=status-icon;
+Comment=Shows a lock and the time left while the lock screen refuses PINs after failed attempts
+Plugin=@PLUGIN_DIR@/libphosh-plugin-furios-lockout.so

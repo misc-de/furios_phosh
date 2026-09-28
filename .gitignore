@@ -3,3 +3,5 @@
 *.so
 folder-dock/furios-folder-dock.plugin
 folder-dock/tests/dock-works
+lockout-status/furios-lockout.plugin
+lockout-status/tests/lockout-works

@@ -115,6 +115,17 @@ seconds_left (const char *path)
 
 static gboolean on_tick (gpointer user_data);
 
+/* The children as well as the box: phosh calls gtk_widget_show() on the box
+   it is handed, which no_show_all does not stop, and a shown box with a
+   shown lock in it is a lock in the bar. Hidden children leave it empty. */
+static void
+set_showing (FuriosLockoutStatus *self, gboolean on)
+{
+  gtk_widget_set_visible (self->image, on);
+  gtk_widget_set_visible (self->label, on);
+  gtk_widget_set_visible (GTK_WIDGET (self), on);
+}
+
 static void
 refresh (FuriosLockoutStatus *self)
 {
@@ -122,7 +133,7 @@ refresh (FuriosLockoutStatus *self)
 
   if (left <= 0) {
     g_clear_handle_id (&self->tick_id, g_source_remove);
-    gtk_widget_set_visible (GTK_WIDGET (self), FALSE);
+    set_showing (self, FALSE);
     return;
   }
 
@@ -137,7 +148,7 @@ refresh (FuriosLockoutStatus *self)
       text = g_strdup_printf ("%d:%02d", (int) (left / 60), (int) (left % 60));
     gtk_label_set_text (GTK_LABEL (self->label), text);
   }
-  gtk_widget_set_visible (GTK_WIDGET (self), TRUE);
+  set_showing (self, TRUE);
 
   if (self->tick_id == 0)
     self->tick_id = g_timeout_add_seconds (1, on_tick, self);
@@ -242,10 +253,10 @@ furios_lockout_status_init (FuriosLockoutStatus *self)
                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
   gtk_box_pack_start (GTK_BOX (self), self->image, FALSE, FALSE, 0);
   gtk_box_pack_start (GTK_BOX (self), self->label, FALSE, FALSE, 0);
-  gtk_widget_show (self->image);
-  gtk_widget_show (self->label);
-
-  /* phosh shows every widget it is handed; staying away is our doing. */
+  /* phosh shows every widget it is handed; staying away is our doing -
+     refresh() below decides for all three. */
+  gtk_widget_set_no_show_all (self->image, TRUE);
+  gtk_widget_set_no_show_all (self->label, TRUE);
   gtk_widget_set_no_show_all (GTK_WIDGET (self), TRUE);
 
   file = g_file_new_for_path (self->path);

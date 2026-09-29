@@ -70,6 +70,22 @@ label_of (GtkWidget *widget)
 }
 
 
+/* Something in the bar: the box AND the lock in it. The box alone is what
+   phosh forces visible, so checking only that missed the lock after a boot. */
+static gboolean
+showing (GtkWidget *widget)
+{
+  g_autoptr (GList) kids = gtk_container_get_children (GTK_CONTAINER (widget));
+
+  if (!gtk_widget_get_visible (widget))
+    return FALSE;
+  for (GList *l = kids; l; l = l->next)
+    if (GTK_IS_IMAGE (l->data) && gtk_widget_get_visible (l->data))
+      return TRUE;
+  return FALSE;
+}
+
+
 /* Pump the main loop until the widget shows what it should, or give up
    after `seconds`. The file monitor is what answers here - well inside the
    60 s safety poll, so a monitor that never fires fails this test. */
@@ -81,7 +97,7 @@ settles (GtkWidget *widget, gboolean visible, const char *prefix, int seconds)
   while (g_get_monotonic_time () < deadline) {
     const char *text = gtk_label_get_text (GTK_LABEL (label_of (widget)));
 
-    if (gtk_widget_get_visible (widget) == visible &&
+    if (showing (widget) == visible &&
         (prefix == NULL || g_str_has_prefix (text, prefix)))
       return TRUE;
     g_main_context_iteration (NULL, FALSE);
@@ -151,10 +167,12 @@ main (int argc, char *argv[])
 
   widget = g_object_new (g_io_extension_get_type (extension), NULL);
   g_object_ref_sink (widget);
-  /* phosh calls show_all on what it is handed. */
+  /* phosh calls plain show on what it is handed, after construction - and
+     no_show_all does not stop that. show_all is tried as well. */
+  gtk_widget_show (widget);
   gtk_widget_show_all (widget);
 
-  result ("no state file: nothing in the bar", !gtk_widget_get_visible (widget), NULL);
+  result ("no state file: nothing in the bar", !showing (widget), NULL);
 
   write_state ("2 0 0 0 1790000000\n");
   result ("failures but no lock: nothing in the bar",

@@ -19,5 +19,9 @@ Anything it cannot read shows nothing.
 
 phosh loads plugins at start, so it appears after the next reboot.
 
+The installer adds `furios-lockout` to phosh's plugin list itself; before it
+does, the list as it was is recorded, and `uninstall.sh` puts that back -
+see "What was there before" in the [top README](../README.md).
+
 Tests: `tests/run-tests.sh` loads the plugin the way phosh does and moves a
 state file of its own under it.

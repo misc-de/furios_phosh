@@ -93,3 +93,7 @@ apps added later while folders keep theirs.
 ## Uninstall
 
     ./uninstall.sh
+
+Puts phosh's plugin list back to what it was before the first install -
+recorded then, not guessed now; see "What was there before" in the
+[top README](../README.md).

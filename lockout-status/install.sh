@@ -25,6 +25,8 @@ pkg-config --exists phosh-plugins 2>/dev/null \
     || missing+=("phosh's plugin headers (apt install phosh-dev)")
 pkg-config --exists gtk+-3.0 2>/dev/null \
     || missing+=("GTK 3 headers (apt install libgtk-3-dev)")
+python3 -c 'import gi' 2>/dev/null \
+    || missing+=("python3-gi (it keeps the record of the original state)")
 if [ ${#missing[@]} -gt 0 ]; then
     printf 'Missing: %s\n' "${missing[@]}" >&2
     echo "Nothing was built." >&2
@@ -35,6 +37,12 @@ echo "1) building"
 make -C "$SRC" all
 
 echo "2) installing"
+# Before the first write, what the phone had: phosh's plugin list (and
+# whether it had a value at all), every path this repository writes and
+# which directories above them were missing. Taken once - a reinstall finds
+# the record and keeps it - and read back by uninstall.sh. See
+# lib/furios-phosh-original.
+DESTDIR="${DESTDIR:-}" python3 "$SRC/../lib/furios-phosh-original" record
 # DESTDIR, as in make: a staged root instead of /, for the tests.
 sudo make -C "$SRC" install DESTDIR="${DESTDIR:-}"
 

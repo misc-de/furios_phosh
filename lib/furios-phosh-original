@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+#
+# What the phone looked like before this repository changed anything, kept
+# so that the uninstallers put back what WAS there instead of what probably
+# was there.
+#
+# Why a record and not a comparison with the default: the uninstallers used
+# to compare phosh's plugin list with the schema default and reset the key
+# when the two matched. That is a guess about the phone, and it is wrong in
+# exactly the case that matters - somebody who had written the default list
+# into dconf on purpose (which pins it against a later phosh changing the
+# default) found the key reset afterwards, and somebody whose list only
+# happened to differ from the default found it rewritten. The same held for
+# the directories: /usr/local/libexec and the shell unit's drop-in directory
+# were removed "while empty", whether we had made them or not.
+#
+# So the first installer of this repository that runs writes down, BEFORE it
+# writes anything itself:
+#
+#   - phosh's plugin list: whether the key had a value in dconf at all
+#     ("unset" is not the same as "set to the default": only `gsettings
+#     reset` gives a key back to the schema, a written value stays pinned),
+#     and which value;
+#   - every path this repository writes, in the system and in the home, and
+#     whether it was there;
+#   - every directory that did not exist yet above those paths - the ones
+#     `install -D`, `mkdir -p` or g_mkdir_with_parents() would make.
+#
+# The record is taken once. A second install, a reinstall, the other plugin's
+# installer: all of them find it and leave it alone - the phone before the
+# FIRST change is the one to go back to, and a record taken over our own
+# changes would describe them instead. It goes when the last plugin of this
+# repository is uninstalled, after it has been used.
+#
+# It lives in the home, like everything else the user's session keeps:
+#
+#   ${XDG_STATE_HOME:-~/.local/state}/furios-phosh/original.json
+#
+# A path of ours that is already there when the record is taken means an
+# install from before records existed. What was there before THAT is not
+# known any more, and the record says so ("legacy"); the uninstallers then do
+# what they did before and say that they are guessing.
+#
+# The folder dock's entry in the plugin list is also switched by furios_app
+# (tab "Phosh"), which writes ~/.config/furios-folder-dock.conf as well. The
+# app offers that switch only once the plugin is installed, so the record
+# taken here - by the installer - is always older than the app's first
+# change, and the uninstaller's restore covers the app's changes too.
+#
+# Usage (from the installers; DESTDIR is honoured for every system path):
+#   furios-phosh-original record            take the record, unless there is one
+#   furios-phosh-original status            what it says, for a human
+#   furios-phosh-original has-record        exit 0 when there is one
+#   furios-phosh-original legacy            exit 0 when it cannot be trusted
+#   furios-phosh-original key-remove NAME [--final]
+#                                           NAME out of phosh's list; with
+#                                           --final (no plugin of ours left)
+#                                           the list goes back to the record
+#   furios-phosh-original dirs --system     directories that were not there,
+#                                           deepest first (for `sudo rmdir`)
+#   furios-phosh-original finish            the home's missing directories
+#                                           out again while empty, and the
+#                                           record itself
+import json
+import os
+import subprocess
+import sys
+import time
+
+SCHEMA = "mobi.phosh.shell.plugins"
+KEY = "status-icons"
+# Every name this repository ever puts into phosh's list. The guard takes
+# out every furios-* name, but only these are ours to put back or take out.
+OURS = ("furios-folder-dock", "furios-lockout")
+PLUGIN_FILES = [f"libphosh-plugin-{n}.so" for n in OURS] + [f"{n}.plugin" for n in OURS]
+GUARD = "/usr/local/libexec/furios-phosh-guard"
+DROPIN = "/etc/systemd/user/mobi.phosh.Shell.service.d/50-furios-phosh-guard.conf"
+
+HOME = os.path.expanduser("~")
+DESTDIR = os.environ.get("DESTDIR", "")
+
+
+def xdg(var, fallback):
+    return os.environ.get(var) or os.path.join(HOME, fallback)
+
+
+STATE_HOME = xdg("XDG_STATE_HOME", ".local/state")
+RECORD_DIR = os.path.join(STATE_HOME, "furios-phosh")
+RECORD = os.path.join(RECORD_DIR, "original.json")
+
+
+def plugin_dir():
+    """Where make puts the plugins: pkg-config while phosh-dev is there,
+    otherwise wherever a plugin directory of phosh's is found."""
+    try:
+        out = subprocess.run(
+            ["pkg-config", "--variable=status_icons_plugins_dir", "phosh-plugins"],
+            capture_output=True, text=True).stdout.strip()
+    except OSError:
+        out = ""
+    if out:
+        return out
+    import glob
+    found = sorted(glob.glob(DESTDIR + "/usr/lib/*/phosh/plugins"))
+    return found[0][len(DESTDIR):] if found else None
+
+
+def system_paths():
+    paths = [GUARD, DROPIN]
+    pdir = plugin_dir()
+    if pdir:
+        paths += [os.path.join(pdir, f) for f in PLUGIN_FILES]
+    return paths
+
+
+def home_paths():
+    return [
+        # what the folder dock writes while it builds (GUARD_FILE in
+        # folder-dock.c) and what furios_app writes for it
+        os.path.join(xdg("XDG_CACHE_HOME", ".cache"), "furios-folder-dock.armed"),
+        os.path.join(xdg("XDG_CONFIG_HOME", ".config"), "furios-folder-dock.conf"),
+        # the guard's own state, made on every start of the shell
+        os.path.join(STATE_HOME, "furios-phosh-guard"),
+        # and this record
+        RECORD,
+    ]
+
+
+def missing_parents(path, root, stop):
+    """The directories above `path` that do not exist, deepest first.
+
+    `stop` is where to stop looking: "/" for the system, the home for the
+    home - the home itself is never ours to make or take away."""
+    out = []
+    d = os.path.dirname(path)
+    while d and d != stop and d != "/" and not os.path.exists(root + d):
+        out.append(d)
+        d = os.path.dirname(d)
+    return out
+
+
+def settings():
+    """phosh's plugin settings, or None where phosh's schema is not there.
+    Looked up first: Gio.Settings.new() on an unknown schema aborts the
+    process instead of raising."""
+    from gi.repository import Gio
+    source = Gio.SettingsSchemaSource.get_default()
+    if source is None or source.lookup(SCHEMA, True) is None:
+        return None
+    return Gio.Settings.new(SCHEMA)
+
+
+def read_key():
+    s = settings()
+    if s is None:
+        return {"schema_missing": True}
+    user = s.get_user_value(KEY)
+    value = s.get_strv(KEY)
+    return {
+        "schema_missing": False,
+        # None in dconf is "unset": the schema's default applies, and only
+        # `gsettings reset` gives that back.
+        "set": user is not None,
+        "value": list(user.unpack()) if user is not None else None,
+        "default": list(s.get_default_value(KEY).unpack()),
+        "had_ours": any(n in value for n in OURS),
+    }
+
+
+def load():
+    try:
+        with open(RECORD) as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def cmd_record():
+    old = load()
+    if old is not None:
+        print(f"original state: kept the record of {old.get('recorded', '?')}")
+        return 0
+    system = {p: os.path.lexists(DESTDIR + p) for p in system_paths()}
+    home = {p: os.path.lexists(p) for p in home_paths()}
+    key = read_key()
+    sys_dirs, home_dirs = [], []
+    for p in system:
+        sys_dirs += [d for d in missing_parents(p, DESTDIR, "/") if d not in sys_dirs]
+    for p in home:
+        home_dirs += [d for d in missing_parents(p, "", HOME) if d not in home_dirs]
+    # Any path of ours already there: an install from before this record.
+    # The record itself is not one of them - it would not be read if it were.
+    legacy = any(v for p, v in {**system, **home}.items() if p != RECORD) \
+        or key.get("had_ours", False)
+    rec = {
+        "version": 1,
+        "recorded": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "legacy": legacy,
+        "key": key,
+        "system": system,
+        "home": home,
+        "system_dirs_missing": sorted(set(sys_dirs), key=lambda d: -d.count("/")),
+        "home_dirs_missing": sorted(set(home_dirs), key=lambda d: -d.count("/")),
+    }
+    os.makedirs(RECORD_DIR, exist_ok=True)
+    tmp = RECORD + ".new"
+    with open(tmp, "w") as handle:
+        json.dump(rec, handle, indent=1)
+    os.replace(tmp, RECORD)
+    print(f"original state recorded in {RECORD}")
+    if legacy:
+        print("  (an earlier install of ours was already there - what the "
+              "phone had before that is not known)")
+    return 0
+
+
+def cmd_status():
+    rec = load()
+    if rec is None:
+        print("no record of the original state")
+        return 1
+    print(json.dumps(rec, indent=1))
+    return 0
+
+
+def key_remove(name, final):
+    s = settings()
+    if s is None:
+        print("phosh's plugin list is not available here - nothing to take out")
+        return 0
+    names = s.get_strv(KEY)
+    drop = OURS if final else (name,)
+    target = [n for n in names if n not in drop]
+    rec = load()
+    orig = (rec or {}).get("key") or {}
+    trusted = rec is not None and not orig.get("schema_missing", True) \
+        and not orig.get("had_ours", True)
+    default = list(s.get_default_value(KEY).unpack())
+    if trusted:
+        before = orig["value"] if orig["set"] else default
+        if target == before:
+            # Exactly what the phone had: unset goes back to unset, a value
+            # stays a value - even when it equals the default.
+            if orig["set"]:
+                if s.get_user_value(KEY) is None or names != before:
+                    s.set_strv(KEY, before)
+            elif s.get_user_value(KEY) is not None:
+                s.reset(KEY)
+        else:
+            if target != names:
+                s.set_strv(KEY, target)
+            if final:
+                print(f"phosh's plugin list was changed since the install - left as it is "
+                      f"(only our names taken out): {target}; before the install it was "
+                      f"{orig['value'] if orig['set'] else 'unset (the default)'}")
+    else:
+        if target == default:
+            if s.get_user_value(KEY) is not None:
+                s.reset(KEY)
+        elif target != names:
+            s.set_strv(KEY, target)
+        if final:
+            print("no record of phosh's plugin list from before the install "
+                  "(installed before records were kept) - compared with phosh's "
+                  "default instead, which is a guess")
+    from gi.repository import Gio
+    Gio.Settings.sync()
+    return 0
+
+
+def cmd_dirs(which):
+    rec = load()
+    if rec is None:
+        return 1
+    for d in rec.get(f"{which}_dirs_missing", []):
+        print(d)
+    return 0
+
+
+def cmd_finish():
+    rec = load()
+    for p in (RECORD, RECORD + ".new"):
+        try:
+            os.unlink(p)
+        except FileNotFoundError:
+            pass
+    try:
+        os.rmdir(RECORD_DIR)
+    except OSError:
+        pass
+    if rec is None:
+        return 0
+    # Deepest first, and only while empty: whatever somebody else put there
+    # since keeps the directory.
+    for d in rec.get("home_dirs_missing", []):
+        try:
+            os.rmdir(d)
+        except OSError:
+            pass
+    return 0
+
+
+def main(argv):
+    if not argv:
+        print(__doc__ or "usage: see the head of this file", file=sys.stderr)
+        return 2
+    cmd, args = argv[0], argv[1:]
+    if cmd == "record":
+        return cmd_record()
+    if cmd == "status":
+        return cmd_status()
+    if cmd == "has-record":
+        return 0 if load() is not None else 1
+    if cmd == "legacy":
+        rec = load()
+        return 0 if rec is None or rec.get("legacy") else 1
+    if cmd == "key-remove" and args:
+        return key_remove(args[0], "--final" in args[1:])
+    if cmd == "dirs" and args in (["--system"], ["--home"]):
+        return cmd_dirs(args[0][2:])
+    if cmd == "finish":
+        return cmd_finish()
+    print(f"unknown: {' '.join(argv)}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

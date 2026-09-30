@@ -31,41 +31,31 @@ if [ -z "$PLUGIN_DIR" ]; then
     done
 fi
 
+# Is this the last plugin of this repository? Then the list goes back to
+# what the record says the phone had before the first install, and the guard
+# and the record go too. Otherwise only our own name comes out.
+ORIG="$SRC/../lib/furios-phosh-original"
+final=1
+for other in furios-folder-dock furios-lockout; do
+    [ "$other" = "$PLUGIN" ] && continue
+    [ -n "$PLUGIN_DIR" ] && [ -e "$DESTDIR$PLUGIN_DIR/$other.plugin" ] && final=0
+done
+
 # The setting first, and only our own entry in it: a shell that goes on being
 # told to load a plugin which is no longer there logs a warning on every
 # start, and somebody else's plugin in the same list is none of our business.
-# A list that ends up as it shipped is reset rather than written: a value in
-# the user's dconf, even the default one, pins the key against whatever a
-# later phosh ships, and a new phone has no value there at all.
-if command -v gsettings >/dev/null; then
-    python3 - "$PLUGIN" <<'PY' || true
-import ast, os, subprocess, sys
-key = ["mobi.phosh.shell.plugins", "status-icons"]
-
-
-def read(env=None):
-    out = subprocess.run(["gsettings", "get"] + key, capture_output=True,
-                         text=True, env=env)
-    text = out.stdout.strip()
-    if text.startswith("@as "):
-        text = text[4:]
-    return list(ast.literal_eval(text))
-
-
-try:
-    names = [n for n in read() if n != sys.argv[1]]
-except (ValueError, SyntaxError):
-    sys.exit(0)
-# The memory backend holds no values, so what it answers is the default.
-try:
-    default = read(dict(os.environ, GSETTINGS_BACKEND="memory"))
-except (ValueError, SyntaxError):
-    default = None
-if names == default:
-    subprocess.run(["gsettings", "reset"] + key, check=False)
-else:
-    subprocess.run(["gsettings", "set"] + key + [str(names)], check=False)
-PY
+#
+# What the list goes back to is not guessed: lib/furios-phosh-original
+# recorded it before the first install - whether the key had a value in
+# dconf at all, and which. Unset goes back to unset (`gsettings reset`), a
+# value goes back to that value, even when it equals the default. A list
+# somebody changed since is left as it is, with only our names taken out,
+# and that is said. Without a record (installed before records were kept)
+# it compares with the schema default as it used to, and says that too.
+if [ "$final" = 1 ]; then
+    DESTDIR="$DESTDIR" python3 "$ORIG" key-remove "$PLUGIN" --final || true
+else
+    DESTDIR="$DESTDIR" python3 "$ORIG" key-remove "$PLUGIN" || true
 fi
 
 # What was written as the user: the crash mark the plugin leaves in the cache
@@ -84,11 +74,8 @@ fi
 
 # The guard came with the first plugin of this repository, so it goes with
 # the last one. Somebody else's furios-* plugin does not keep it: it was
-# never installed for those.
-left=0
-for other in furios-folder-dock furios-lockout; do
-    [ -n "$PLUGIN_DIR" ] && [ -e "$DESTDIR$PLUGIN_DIR/$other.plugin" ] && left=1
-done
-[ "$left" = 1 ] || DESTDIR="$DESTDIR" "$SRC/../guard/uninstall.sh"
+# never installed for those. The guard's uninstaller also takes out the
+# directories the record says were missing, and then the record itself.
+[ "$final" = 1 ] && DESTDIR="$DESTDIR" "$SRC/../guard/uninstall.sh"
 
 echo "Removed. The shell drops it at its next start."

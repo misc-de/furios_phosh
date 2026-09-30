@@ -7,7 +7,8 @@
 #
 # Checked from the outside, not by reading uninstall.sh against install.sh:
 # both installers run for real, into a staged root (DESTDIR) and a home of
-# their own, with a sudo, a gsettings and a systemctl that only stand in.
+# their own, with a sudo and a systemctl that only stand in, and gsettings
+# on a key file of their own.
 # Then the plugins do what they do at runtime - the guard runs as the shell
 # unit would run it, and every file the C code builds under a user directory
 # is put where the code says - and then both uninstallers run. What is left
@@ -36,7 +37,8 @@ check() {
 
 printf '\n\033[1m== uninstall leaves the phone as it shipped\033[0m\n'
 if ! pkg-config --exists phosh-plugins gtk+-3.0 2>/dev/null \
-        || ! command -v make >/dev/null || ! command -v cc >/dev/null; then
+        || ! command -v make >/dev/null || ! command -v cc >/dev/null \
+        || ! command -v glib-compile-schemas >/dev/null || ! python3 -c 'import gi' 2>/dev/null; then
     printf '  \033[33mskipped\033[0m - the installers build the plugins, and there is nothing to build with\n'
     exit 0
 fi
@@ -45,7 +47,7 @@ PLUGIN_DIR=$(pkg-config --variable=status_icons_plugins_dir phosh-plugins)
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 ROOT="$WORK/root"
 TESTHOME="$WORK/home"
-mkdir -p "$WORK/bin" "$WORK/gs" "$TESTHOME"
+mkdir -p "$WORK/bin" "$TESTHOME"
 
 # What a new phone has, as far as these installers are concerned: phosh's
 # plugin directory, the user units' directory in /etc, and what Debian's
@@ -88,33 +90,39 @@ EOF
 for stub in systemctl logger; do
     printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/$stub"
 done
-# One file per key; no file is no value in dconf, which is what a new phone
-# has. The memory backend answers the schema default, as the real one does.
-cat > "$WORK/bin/gsettings" <<EOF
-#!/bin/sh
-f="$WORK/gs/\$3"
-[ "\$2" = mobi.phosh.shell.plugins ] && [ "\$3" = status-icons ] || exit 1
-case "\$1" in
-get) if [ "\${GSETTINGS_BACKEND:-}" = memory ] || [ ! -e "\$f" ]; then
-         echo "@as []"
-     else cat "\$f"; fi ;;
-set) printf '%s\n' "\$4" > "\$f" ;;
-reset) rm -f "\$f" ;;
-*) exit 1 ;;
-esac
-EOF
+# gsettings is the real one, on the keyfile backend and with phosh's plugin
+# schema compiled into the sandbox: "no value" and "the default written as a
+# value" are then the real distinction dconf makes, and neither the scripts
+# nor lib/furios-phosh-original (which asks GIO directly) can reach this
+# phone's dconf. A stand-in for the command alone would not do - GIO in the
+# record helper would go past it, straight to the phone's settings.
+mkdir -p "$WORK/schemas" "$TESTHOME/.config/glib-2.0/settings"
+cat > "$WORK/schemas/mobi.phosh.shell.plugins.gschema.xml" <<'XML'
+<schemalist>
+  <schema id="mobi.phosh.shell.plugins" path="/mobi/phosh/shell/plugins/">
+    <key name="status-icons" type="as"><default>[]</default></key>
+  </schema>
+</schemalist>
+XML
+glib-compile-schemas "$WORK/schemas"
 chmod +x "$WORK/bin/"*
 
-tree() { (cd "$1" && find . -mindepth 1 | LC_ALL=C sort | tr '\n' ' '); }
+# The settings' key file is left out of the tree and looked at on its own.
+tree() { (cd "$1" && find . -mindepth 1 -not -path './.config/glib-2.0*' | LC_ALL=C sort | tr '\n' ' '); }
 stage() {
     env -u XDG_CONFIG_HOME -u XDG_CACHE_HOME -u XDG_STATE_HOME -u XDG_DATA_HOME \
-        HOME="$TESTHOME" PATH="$WORK/bin:$PATH" DESTDIR="$ROOT" "$@"
+        -u DBUS_SESSION_BUS_ADDRESS \
+        HOME="$TESTHOME" PATH="$WORK/bin:$PATH" DESTDIR="$ROOT" \
+        GSETTINGS_BACKEND=keyfile GSETTINGS_SCHEMA_DIR="$WORK/schemas" "$@"
 }
+icons() { stage gsettings get mobi.phosh.shell.plugins status-icons; }
+# The key's line in the key file: none at all is no value in dconf.
+stored() { grep '^status-icons=' "$TESTHOME/.config/glib-2.0/settings/keyfile" 2>/dev/null; }
 ROOT_BEFORE=$(tree "$ROOT")
 HOME_BEFORE=$(tree "$TESTHOME")
 
 # A list with somebody else's plugin in it, as the user set it.
-printf '%s\n' "['wifi-hotspot']" > "$WORK/gs/status-icons"
+stage gsettings set mobi.phosh.shell.plugins status-icons "['wifi-hotspot']"
 
 stage "$REPO/folder-dock/install.sh" >/dev/null 2>"$WORK/err" \
     || { cat "$WORK/err"; check "folder-dock/install.sh ran" 0 1; }
@@ -166,15 +174,14 @@ stage "$REPO/lockout-status/uninstall.sh" >/dev/null 2>"$WORK/err" \
 check "no system path outside the stage was touched" "" "$(cat "$WORK/refused" 2>/dev/null)"
 check "the staged root is as it shipped" "$ROOT_BEFORE" "$(tree "$ROOT")"
 check "the home holds only what was there before" "$HOME_BEFORE" "$(tree "$TESTHOME")"
-check "somebody else's plugin is still listed" "['wifi-hotspot']" "$(cat "$WORK/gs/status-icons" 2>/dev/null)"
+check "somebody else's plugin is still listed" "['wifi-hotspot']" "$(icons)"
 
 # And from a new phone: no value in dconf before, so none after either.
-rm -f "$WORK/gs/status-icons"
+stage gsettings reset mobi.phosh.shell.plugins status-icons
 stage "$REPO/lockout-status/install.sh" >/dev/null 2>&1
-check "the lockout installer lists itself" "['furios-lockout']" "$(cat "$WORK/gs/status-icons" 2>/dev/null)"
+check "the lockout installer lists itself" "['furios-lockout']" "$(icons)"
 stage "$REPO/lockout-status/uninstall.sh" >/dev/null 2>&1
-check "a list back at its default is reset, not written" no \
-    "$([ -e "$WORK/gs/status-icons" ] && echo yes || echo no)"
+check "a list that had no value has none again (reset, not written)" "" "$(stored)"
 check "and the stage is empty again" "$ROOT_BEFORE" "$(tree "$ROOT")"
 
 echo

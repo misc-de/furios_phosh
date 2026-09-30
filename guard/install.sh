@@ -13,6 +13,10 @@ fi
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # DESTDIR, as in make: a staged root instead of /, for the tests.
 DESTDIR=${DESTDIR:-}
+# The plugins' installers have taken the record of the original state before
+# they call this; run on its own, the guard takes it itself. A record that is
+# there already is kept (lib/furios-phosh-original).
+DESTDIR="$DESTDIR" python3 "$SRC/../lib/furios-phosh-original" record >/dev/null
 sudo install -Dm755 "$SRC/furios-phosh-guard" "$DESTDIR/usr/local/libexec/furios-phosh-guard"
 sudo install -Dm644 "$SRC/50-furios-phosh-guard.conf" \
     "$DESTDIR/etc/systemd/user/mobi.phosh.Shell.service.d/50-furios-phosh-guard.conf"

@@ -27,6 +27,12 @@ FOUND=$((FOUND + 1))
 printf '\n\033[1m#### uninstall\033[0m\n'
 if bash "$HERE/tests/uninstall-leaves-nothing.sh"; then :; else FAILED=$((FAILED + 1)); fi
 
+# And that it goes back to what was recorded before the first install - not
+# to what a new phone probably has.
+FOUND=$((FOUND + 1))
+printf '\n\033[1m#### original state\033[0m\n'
+if bash "$HERE/tests/original-state.sh"; then :; else FAILED=$((FAILED + 1)); fi
+
 echo
 if [ "$FOUND" -eq 0 ]; then
     # Otherwise an empty collection cheerfully reports success.

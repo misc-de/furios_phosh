@@ -21,6 +21,12 @@ for suite in "$HERE"/*/tests/run-tests.sh; do
     if bash "$suite"; then :; else FAILED=$((FAILED + 1)); fi
 done
 
+# Across the subprojects: every uninstaller together leaves the phone as it
+# shipped. Its own suite, since it installs all of them.
+FOUND=$((FOUND + 1))
+printf '\n\033[1m#### uninstall\033[0m\n'
+if bash "$HERE/tests/uninstall-leaves-nothing.sh"; then :; else FAILED=$((FAILED + 1)); fi
+
 echo
 if [ "$FOUND" -eq 0 ]; then
     # Otherwise an empty collection cheerfully reports success.

@@ -35,7 +35,8 @@ echo "1) building"
 make -C "$SRC" all
 
 echo "2) installing"
-sudo make -C "$SRC" install
+# DESTDIR, as in make: a staged root instead of /, for the tests.
+sudo make -C "$SRC" install DESTDIR="${DESTDIR:-}"
 
 # The guard that takes our plugins out again if a phosh update makes the
 # shell crash on them - installed with every plugin of this repository.

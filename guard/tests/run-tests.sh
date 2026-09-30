@@ -66,6 +66,23 @@ guard restore >/dev/null
 check "restore puts the list back" "$LIST" "$(icons)"
 check "and clears the mark" yes "$(guard status | grep -q 'not triggered' && echo yes || echo no)"
 
+# restore undoes only the guard's own change. A list somebody changed after
+# the guard stepped in is theirs: it stays, and the saved one is kept and
+# shown, to be put back by hand.
+printf '%s\n' "$LIST" > "$WORK/store.status-icons"
+rm -rf "$WORK/state"
+guard check; guard check
+printf "['wifi-hotspot', 'caffeine']\n" > "$WORK/store.status-icons"
+out=$(guard restore)
+check "restore leaves a list changed since alone" "['wifi-hotspot', 'caffeine']" "$(icons)"
+check "and says so" yes "$(grep -q 'changed since' <<<"$out" && echo yes || echo no)"
+check "and keeps what it saved" "$LIST" "$(cat "$WORK/state/status-icons")"
+check "and still reports itself triggered" yes \
+    "$(guard status | grep -q 'disabled since' && echo yes || echo no)"
+printf "['wifi-hotspot']\n" > "$WORK/store.status-icons"
+guard restore >/dev/null
+check "back to what the guard wrote, restore goes through" "$LIST" "$(icons)"
+
 rm -rf "$WORK/state"
 guard check
 BOOT=boot-b guard check

@@ -53,6 +53,11 @@ disable() {
         # the first list saved is the one somebody chose.
         [ -e "$STATE/$key" ] || printf '%s\n' "$cur" > "$STATE/$key"
         if $GSETTINGS set "$SCHEMA" "$key" "$new" 2>/dev/null; then
+            # And what we wrote in its place, read back the way gsettings
+            # prints it: restore compares the list with this, so it only
+            # undoes our own change - see restore().
+            $GSETTINGS get "$SCHEMA" "$key" > "$STATE/$key.ours" 2>/dev/null \
+                || printf '%s\n' "$new" > "$STATE/$key.ours"
             log "phosh restarted within ${WINDOW}s - took our plugins out of $key (was: $cur)"
             took=1
         fi
@@ -61,17 +66,39 @@ disable() {
     return 0
 }
 
+# Puts back the list the guard took our names out of - but only where the
+# list is still the one the guard wrote. Somebody who changed it since (added
+# a plugin, took one out by hand) made a choice after ours, and writing the
+# old list over it would undo that choice without a word. Then the saved list
+# is kept, printed, and left for them to put back by hand.
+#
+# The key was necessarily SET when the guard acted: a list with furios-* names
+# in it is never phosh's default, so writing the saved value back is exact -
+# there is no "unset" to lose here. (What the phone had before the plugins
+# were installed is a different record, furios-phosh-original's, and the
+# uninstallers go back to that one.)
 restore() {
-    local key done_any=0
+    local key done_any=0 cur ours
     for key in $KEYS; do
         [ -r "$STATE/$key" ] || continue
+        cur=$($GSETTINGS get "$SCHEMA" "$key" 2>/dev/null) || cur=
+        ours=$(cat "$STATE/$key.ours" 2>/dev/null) || ours=
+        if [ -n "$ours" ] && [ "$cur" != "$ours" ]; then
+            echo "$key was changed since the guard took our plugins out - left as it is."
+            echo "  now:   $cur"
+            echo "  saved: $(cat "$STATE/$key")"
+            echo "  put it back by hand with: gsettings set $SCHEMA $key \"$(cat "$STATE/$key")\""
+            done_any=1
+            continue
+        fi
         if $GSETTINGS set "$SCHEMA" "$key" "$(cat "$STATE/$key")"; then
-            rm -f "$STATE/$key"
+            rm -f "$STATE/$key" "$STATE/$key.ours"
             echo "restored $key"
             done_any=1
         fi
     done
-    rm -f "$STATE/disabled"
+    # The mark goes only once nothing is left to put back.
+    ls "$STATE"/*.ours >/dev/null 2>&1 || rm -f "$STATE/disabled"
     [ "$done_any" = 1 ] || echo "nothing to restore"
     return 0
 }

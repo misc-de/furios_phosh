@@ -46,15 +46,16 @@ done
 # be true on another.
 if [ "$left" = 0 ]; then
     if DESTDIR="$DESTDIR" python3 "$ORIG" legacy 2>/dev/null; then
-        echo "No record of the original state (installed before records were kept):"
-        echo "  removing the guard's directories while empty, as before - a guess."
+        echo "No full record of the original state (installed before records were"
+        echo "  kept): removing the guard's directories while empty, as before - a guess."
         sudo rmdir "$DROPIN_DIR" 2>/dev/null || true
         sudo rmdir "$DESTDIR/usr/local/libexec" 2>/dev/null || true
-    else
-        while read -r d; do
-            [ -n "$d" ] && { sudo rmdir "$DESTDIR$d" 2>/dev/null || true; }
-        done < <(DESTDIR="$DESTDIR" python3 "$ORIG" dirs --system)
     fi
+    # What the record knows for certain - the directories that were missing
+    # when it was taken - holds with or without an older install before it.
+    while read -r d; do
+        [ -n "$d" ] && { sudo rmdir "$DESTDIR$d" 2>/dev/null || true; }
+    done < <(DESTDIR="$DESTDIR" python3 "$ORIG" dirs --system)
 fi
 
 # The time of the last shell start, and the plugin lists it took our names

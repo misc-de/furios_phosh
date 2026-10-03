@@ -587,6 +587,22 @@ on_overlay_draw (GtkWidget *overlay, cairo_t *cr, gpointer user_data)
   width = (rect.width * factor + BLUR_SHRINK - 1) / BLUR_SHRINK;
   height = (rect.height * factor + BLUR_SHRINK - 1) / BLUR_SHRINK;
   small = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, width, height);
+  /* Out of memory, or a size cairo refuses, gives an error surface: data
+     NULL, width and height 0. Nothing is written through it - the blur
+     loops run zero times - but nothing is drawn from it either, and the
+     apps under the dock would vanish, since they are clipped out of the
+     sharp pass above. They are drawn sharp instead, and nothing past this
+     point has to reason about an error surface. */
+  if (cairo_surface_status (small) != CAIRO_STATUS_SUCCESS) {
+    cairo_surface_destroy (small);
+    cairo_save (cr);
+    cairo_rectangle (cr, rect.x, rect.y, rect.width, rect.height);
+    cairo_clip (cr);
+    gtk_container_propagate_draw (GTK_CONTAINER (overlay), dock.scrolled, cr);
+    cairo_restore (cr);
+    gtk_container_propagate_draw (GTK_CONTAINER (overlay), dock.dock, cr);
+    return TRUE;
+  }
   snap = cairo_create (small);
   cairo_scale (snap, scale, scale);
   cairo_translate (snap, -rect.x, -rect.y);

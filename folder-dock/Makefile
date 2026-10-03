@@ -39,8 +39,10 @@ uninstall:
 # there is none - see tests/run-tests.sh.
 # -ldl: the test opens phosh's library itself, the way the shell's process
 # has it open already - without it there is no status icon to derive from.
+# -rdynamic: the test stands in for cairo_image_surface_create towards the
+# plugin, to refuse it the blur surface.
 tests/dock-works: tests/dock-works.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS) -ldl
+	$(CC) $(CFLAGS) -rdynamic -o $@ $< $(LDLIBS) -ldl
 
 check: $(SO) tests/dock-works
 	./tests/dock-works .

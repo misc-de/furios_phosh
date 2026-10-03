@@ -22,6 +22,7 @@
  * the plugin does must leave every index pointing at its own item.
  */
 
+#define _GNU_SOURCE   /* RTLD_NEXT and dladdr */
 #include <gtk/gtk.h>
 #include <gio/gio.h>
 #include <dlfcn.h>
@@ -463,6 +464,35 @@ paint_checker (GtkWidget *widget, cairo_t *cr, gpointer user_data)
 }
 
 
+/* cairo_image_surface_create as the plugin sees it: while this is set, a
+   call from the plugin's own code gets an error surface - status set, data
+   NULL, the same shape cairo hands out when memory runs out (asked for a
+   size it refuses, since cairo offers no way to ask for that one). Every other caller, GTK and
+   this test among them, gets the real thing. The test is linked with
+   -rdynamic so the plugin's call lands here. */
+static gboolean fail_plugin_surfaces = FALSE;
+static int failed_surfaces = 0;
+
+cairo_surface_t *
+cairo_image_surface_create (cairo_format_t format, int width, int height)
+{
+  static cairo_surface_t *(*real) (cairo_format_t, int, int);
+  Dl_info caller;
+
+  if (real == NULL)
+    real = (cairo_surface_t *(*) (cairo_format_t, int, int))
+      dlsym (RTLD_NEXT, "cairo_image_surface_create");
+
+  if (fail_plugin_surfaces &&
+      dladdr (__builtin_return_address (0), &caller) && caller.dli_fname &&
+      strstr (caller.dli_fname, "libphosh-plugin-" PLUGIN_NAME)) {
+    failed_surfaces++;
+    return real (format, -1, -1);
+  }
+  return real (format, width, height);
+}
+
+
 /* Pure red pixels in a band of the rendered overlay. */
 static int
 pure_pixels (cairo_surface_t *surface, int top, int bottom)
@@ -687,6 +717,25 @@ main (int argc, char *argv[])
     check ("under the bar they are blurred, with nothing sharp showing through",
            dock_h > 0 && pure_pixels (surface, h - dock_h, h) == 0);
     cairo_surface_destroy (surface);
+
+    /* No memory for the blurred copy: the apps under the bar are drawn
+       sharp for once. Without the check they were not drawn at all - the
+       error surface paints nothing, and the sharp pass leaves them out. */
+    surface = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, w, h);
+    cr = cairo_create (surface);
+    fail_plugin_surfaces = TRUE;
+    gtk_widget_draw (overlay, cr);
+    fail_plugin_surfaces = FALSE;
+    cairo_destroy (cr);
+    cairo_surface_flush (surface);
+    check ("no memory for the blur: the plugin was refused its surface",
+           failed_surfaces > 0);
+    check ("and drew the apps under the bar sharp instead of leaving a hole",
+           dock_h > 0 && pure_pixels (surface, h - dock_h, h) > 0);
+    check ("with the apps above the bar as before",
+           pure_pixels (surface, 0, h - dock_h) > (h - dock_h) * w / 4);
+    cairo_surface_destroy (surface);
+
     g_signal_handler_disconnect (scrolled, id);
     gtk_widget_set_size_request (scrolled, -1, -1);
     settle ();

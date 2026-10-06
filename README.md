@@ -15,7 +15,7 @@ Small things with no plugin behind them live in [furios_misc][m].
 |---|---|---|
 | [folder-dock](folder-dock/) | a phosh plugin | The overview's folders in a bar at the bottom edge, the apps blurred underneath; optionally one row, and apps without their names |
 | [lockout-status](lockout-status/) | a phosh plugin | A lock and the time left in the top bar while the lock screen refuses PINs after failed attempts (furios_security's lockout); its own widget only, so no crash guard needed |
-| [guard](guard/) | a shell guard | If phosh restarts within a minute of its last start (a plugin no longer fits after a phosh update), every `furios-*` plugin comes out of the plugin lists and the shell runs as shipped; `furios-phosh-guard restore` puts them back. Installed with every plugin here |
+| [guard](guard/) | a shell guard | If phosh crashes and restarts within a minute of its last start (a plugin no longer fits after a phosh update; a stop or restart by hand does not count), every `furios-*` plugin comes out of the plugin lists and the shell runs as shipped; `furios-phosh-guard restore` puts them back. Installed with every plugin here |
 
 Each directory stands on its own: its own README, its own `install.sh`, its
 own tests.

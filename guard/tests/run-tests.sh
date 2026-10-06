@@ -93,6 +93,43 @@ guard check
 WINDOW=0 guard check
 check "starts further apart than the window are not a crash" "$LIST" "$(icons)"
 
+# Only a crash counts. ExecStopPost writes how the shell ended; a stop by
+# systemd (`systemctl restart phosh`) is "success", and two of those in a
+# minute are somebody restarting the shell, not a plugin taking it down.
+stopped() { env SERVICE_RESULT="$1" FURIOS_PHOSH_GUARD_STATE="$WORK/state" \
+    FURIOS_PHOSH_GUARD_BOOT_ID="${BOOT:-boot-a}" sh "$GUARD" stopped 2>/dev/null; }
+rm -rf "$WORK/state"
+guard check; stopped success; guard check; stopped success; guard check
+check "restarts by hand within the window are not a crash" "$LIST" "$(icons)"
+check "and nothing is marked" yes "$(guard status | grep -q 'not triggered' && echo yes || echo no)"
+
+rm -rf "$WORK/state"
+guard check; stopped exit-code; guard check
+check "a shell that exited with a status did not crash" "$LIST" "$(icons)"
+
+rm -rf "$WORK/state"
+guard check; stopped core-dump; guard check
+check "a shell that dumped core is a crash" "['wifi-hotspot']" "$(icons)"
+
+printf '%s\n' "$LIST" > "$WORK/store.status-icons"
+rm -rf "$WORK/state"
+guard check; stopped signal; guard check
+check "a shell killed by a signal is a crash" "['wifi-hotspot']" "$(icons)"
+
+# The record belongs to the one end it was written for: a clean stop, then
+# a crash that left none, is still the crash.
+printf '%s\n' "$LIST" > "$WORK/store.status-icons"
+rm -rf "$WORK/state"
+guard check; stopped success; guard check; guard check
+check "a clean stop is used up by the start after it" "['wifi-hotspot']" "$(icons)"
+
+# One written in an earlier boot says nothing about this one.
+printf '%s\n' "$LIST" > "$WORK/store.status-icons"
+rm -rf "$WORK/state"
+BOOT=boot-old stopped success; guard check; guard check
+check "a clean stop from another boot does not excuse a crash" "['wifi-hotspot']" "$(icons)"
+printf '%s\n' "$LIST" > "$WORK/store.status-icons"
+
 rm -rf "$WORK/state"
 printf "['furios-lockout']\n" > "$WORK/store.status-icons"
 guard check; guard check

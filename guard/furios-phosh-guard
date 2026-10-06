@@ -12,12 +12,20 @@
 # starts a new one five seconds later, and the phone loops without a UI.
 #
 # Run as ExecStartPre of mobi.phosh.Shell.service (with "-", so nothing here
-# can keep the shell from starting). Two starts less than WINDOW seconds
-# apart mean the one before did not survive: every furios-* name comes out of
-# the plugin lists, and what was there is kept to be put back by hand once
-# the plugins are rebuilt:
+# can keep the shell from starting), and as its ExecStopPost with "stopped",
+# which writes down how the shell ended ($SERVICE_RESULT). Two starts less
+# than WINDOW seconds apart, the shell in between having died of a signal
+# (a crash, an abort) or ended with no record at all, mean the one before did
+# not survive: every furios-* name comes out of the plugin lists, and what
+# was there is kept to be put back by hand once the plugins are rebuilt:
 #
 #     furios-phosh-guard restore
+#
+# A shell that was stopped (`systemctl restart phosh`, a logout) ends with
+# "success"; one that exited on its own with a status ("exit-code" - it lost
+# its display) did not crash either. Neither is counted, however quickly the
+# next start follows: two restarts by hand are not a plugin that no longer
+# fits.
 #
 # Only our names are touched. The shipped plugins stay as they were.
 set -u
@@ -105,8 +113,17 @@ restore() {
 
 mkdir -p "$STATE" 2>/dev/null || exit 0
 
+# Within one boot only: a phone switched off and on again quickly starts the
+# shell twice in a minute too, and that is not a crash.
+BOOT_ID=${FURIOS_PHOSH_GUARD_BOOT_ID:-$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)}
+
 case "${1:-check}" in
 restore) restore; exit 0 ;;
+stopped)
+    # From ExecStopPost, after every end of the shell - a crash included,
+    # since systemd runs it whatever became of the main process.
+    printf '%s %s\n' "$BOOT_ID" "${SERVICE_RESULT:-}" > "$STATE/last-stop"
+    exit 0 ;;
 status)
     if [ -e "$STATE/disabled" ]; then
         echo "disabled since $(cat "$STATE/disabled") - phosh kept restarting"
@@ -115,16 +132,25 @@ status)
     fi
     exit 0 ;;
 check) ;;
-*) echo "usage: furios-phosh-guard [check|status|restore]" >&2; exit 2 ;;
+*) echo "usage: furios-phosh-guard [check|status|restore|stopped]" >&2; exit 2 ;;
 esac
 
-# Within one boot only: a phone switched off and on again quickly starts the
-# shell twice in a minute too, and that is not a crash.
-BOOT_ID=${FURIOS_PHOSH_GUARD_BOOT_ID:-$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)}
 now=$(date +%s)
+# How the shell before this start ended - read once, then gone, so it is
+# never taken for the end of a later one. No record (a guard from before
+# this was written, or an end systemd never saw) counts as a crash, as it
+# always did.
+read -r stop_boot stop_result < "$STATE/last-stop" 2>/dev/null || { stop_boot=; stop_result=; }
+rm -f "$STATE/last-stop"
+
 read -r last_boot last < "$STATE/last-start" 2>/dev/null || { last_boot=; last=; }
 printf '%s %s\n' "$BOOT_ID" "$now" > "$STATE/last-start"
 case "$last" in ''|*[!0-9]*) exit 0 ;; esac
 [ "$last_boot" = "$BOOT_ID" ] || exit 0
+if [ "$stop_boot" = "$BOOT_ID" ]; then
+    case "$stop_result" in
+    success|exit-code) exit 0 ;;
+    esac
+fi
 [ $((now - last)) -lt "$WINDOW" ] && disable
 exit 0

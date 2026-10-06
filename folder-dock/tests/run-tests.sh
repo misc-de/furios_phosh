@@ -19,6 +19,30 @@ if [ "$(id -u)" = 0 ]; then
     exit 1
 fi
 
+# Never on the phone's own screen: a test window there once covered a running
+# call. The whole suite reruns itself inside a headless phoc of its own, in a
+# private runtime directory, so GDK cannot reach the session's wayland-0.
+# FURIOS_TEST_WINDOWS=1 uses the session's display instead.
+if [ -z "${FURIOS_TEST_HEADLESS:-}" ] && [ "${FURIOS_TEST_WINDOWS:-}" != 1 ] \
+        && command -v phoc >/dev/null; then
+    rt=$(mktemp -d)
+    chmod 700 "$rt"
+    printf '#!/bin/sh\n"%s"\necho $? > "%s/rc"\n' "$HERE/run-tests.sh" "$rt" > "$rt/run.sh"
+    chmod +x "$rt/run.sh"
+    FURIOS_TEST_HEADLESS=1 XDG_RUNTIME_DIR="$rt" WAYLAND_DISPLAY='' DISPLAY='' \
+        WLR_BACKENDS=headless WLR_RENDERER=pixman \
+        phoc -E "$rt/run.sh" 2>"$rt/phoc.log" &
+    phoc_pid=$!
+    for _ in $(seq 3000); do
+        [ -s "$rt/rc" ] && break
+        sleep 0.1
+    done
+    kill "$phoc_pid" 2>/dev/null; wait "$phoc_pid" 2>/dev/null
+    rc=$(cat "$rt/rc" 2>/dev/null || echo 1)
+    rm -rf "$rt"
+    exit "$rc"
+fi
+
 printf '\n\033[1m== the plugin, built and loaded like the shell loads it\033[0m\n'
 if ! pkg-config --exists phosh-plugins gtk+-3.0 2>/dev/null; then
     printf '  \033[33mskipped\033[0m - no phosh-plugins/gtk+-3.0 (apt install phosh-dev libgtk-3-dev)\n'

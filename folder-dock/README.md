@@ -64,8 +64,10 @@ that, the plugin logs one warning and leaves it alone.
 A crash of phosh ends the session, and with the plugin still listed the next
 login would crash the same way. Before touching the grid the plugin writes
 `~/.cache/furios-folder-dock.armed` and removes it after 15 seconds of a
-standing dock (or when switched off). If the file is there when the plugin
-starts, it does nothing. Switching it on again in the app removes the file.
+standing dock (or when switched off, or when the shell ends in good order -
+`systemctl restart phosh`, a logout: phosh quits through exit(), and a
+destructor takes the mark away, which a crash never runs). If the file is
+there when the plugin starts, it does nothing. Switching it on again in the app removes the file.
 
 Way out by hand, over ssh: take `furios-folder-dock` out of
 

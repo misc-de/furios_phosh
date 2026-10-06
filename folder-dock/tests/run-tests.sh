@@ -45,6 +45,28 @@ else
             FOLDER_DOCK_LEFTOVER_MARK=1 "$ROOT/tests/dock-works" "$ROOT"
             rc=$?
         fi
+        # The shell ending inside the guard's seconds, in its own process each
+        # time, since the process is what ends: in good order (exit, as phosh
+        # quits on SIGTERM - `systemctl restart phosh`) it must not leave the
+        # mark that keeps the dock off for good; killed, as by a crash, it must.
+        if [ "$rc" -eq 0 ]; then
+            for end in clean crash; do
+                printf '  -- again, the shell ending before the mark is cleared: %s\n' "$end"
+                cache=$(mktemp -d)
+                # ": " after it, so the subshell reports the kill into /dev/null
+                ( FOLDER_DOCK_END=$end FOLDER_DOCK_CACHE=$cache \
+                    "$ROOT/tests/dock-works" "$ROOT"; : ) 2>/dev/null
+                if [ -e "$cache/furios-folder-dock.armed" ]; then left=yes; else left=no; fi
+                rm -rf "$cache"
+                if [ "$end" = clean ]; then want=no; else want=yes; fi
+                if [ "$left" = "$want" ]; then
+                    printf '  \033[32mok\033[0m   %s end leaves the mark: %s\n' "$end" "$left"
+                else
+                    printf '  \033[31mFAIL\033[0m %s end leaves the mark: %s, expected %s\n' "$end" "$left" "$want"
+                    rc=1
+                fi
+            done
+        fi
         if [ "$rc" -eq 77 ]; then
             :   # the test says what it is missing, and it is not a failure
         elif [ "$rc" -ne 0 ]; then

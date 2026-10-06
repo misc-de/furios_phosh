@@ -27,6 +27,7 @@
 #include <gio/gio.h>
 #include <dlfcn.h>
 #include <glib/gstdio.h>
+#include <signal.h>
 #include <phosh-plugin.h>
 
 #define PLUGIN_NAME "furios-folder-dock"
@@ -530,7 +531,11 @@ main (int argc, char *argv[])
   /* The crash mark goes to the cache directory; not the real one. GLib
      remembers the answer, so this comes before anything asks. */
   {
-    char *cache = g_dir_make_tmp ("folder-dock-test-XXXXXX", NULL);
+    /* Given from outside when the run ends the process itself, and the
+       mark has to be looked at after it is gone. */
+    char *cache = g_getenv ("FOLDER_DOCK_CACHE")
+      ? g_strdup (g_getenv ("FOLDER_DOCK_CACHE"))
+      : g_dir_make_tmp ("folder-dock-test-XXXXXX", NULL);
 
     g_setenv ("XDG_CACHE_HOME", cache, TRUE);
     guard = g_build_filename (cache, "furios-folder-dock.armed", NULL);
@@ -619,6 +624,19 @@ main (int argc, char *argv[])
   one = g_object_new (type, NULL);
   g_object_ref_sink (one);
   settle ();
+
+  /* The shell ends while the dock is young, nothing taken down: by exit()
+     as phosh quits on SIGTERM, or killed as by a crash. Whether the mark
+     outlives the process is for tests/run-tests.sh to look at. */
+  if (g_getenv ("FOLDER_DOCK_END")) {
+    check ("the crash mark is set before the shell ends",
+           g_file_test (guard, G_FILE_TEST_EXISTS));
+    if (failures)
+      return 1;
+    if (g_str_equal (g_getenv ("FOLDER_DOCK_END"), "crash"))
+      raise (SIGKILL);
+    exit (0);
+  }
 
   check ("nothing of it shows in the bar", !gtk_widget_get_visible (one));
   check ("the crash mark is set while the dock is young",

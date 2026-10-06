@@ -64,6 +64,13 @@ GType phosh_status_icon_get_type (void);
  * that is still there at start means the last attempt did not survive, and
  * the plugin then does nothing until somebody switches it on again (the app
  * removes the mark when it does).
+ *
+ * A shell that ends in good order inside those seconds - stopped by
+ * systemd, `systemctl restart phosh`, a logout - did not crash, and must not
+ * leave the mark behind: phosh quits on SIGTERM through exit(), which runs
+ * the destructors of loaded objects; a crash (a signal, abort()) never
+ * does. So a destructor takes an armed mark away, and only a real crash
+ * keeps it.
  */
 #define GUARD_FILE         "furios-folder-dock.armed"
 #define GUARD_CLEAR_S      15
@@ -112,6 +119,7 @@ typedef struct {
   guint       sync_id;
   gulong      alloc_id;
   guint       guard_id;
+  char       *guard_file; /* the armed mark, for the destructor */
   gboolean    refused;
   gboolean    warned;
 
@@ -761,6 +769,8 @@ build_dock (GtkWidget *grid)
 
     g_mkdir_with_parents (g_get_user_cache_dir (), 0700);
     g_file_set_contents (path, "", 0, NULL);
+    g_free (dock.guard_file);
+    dock.guard_file = g_strdup (path);
     dock.guard_id = g_timeout_add_seconds (GUARD_CLEAR_S, on_guard_clear, NULL);
   }
 
@@ -1056,6 +1066,16 @@ furios_folder_dock_get_type (void)
   }
 
   return type;
+}
+
+
+/* Runs at exit() and never after a crash - see GUARD_FILE. Only a plain
+   unlink: the main loop and most of GTK may be gone by now. */
+__attribute__((destructor)) static void
+on_clean_exit (void)
+{
+  if (dock.guard_id && dock.guard_file)
+    g_unlink (dock.guard_file);
 }
 
 
